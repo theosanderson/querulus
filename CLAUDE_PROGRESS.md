@@ -167,45 +167,47 @@ This file tracks implementation progress for the Querulus project. It should be 
 
 **Phase 2: Sequence Endpoints**
 
-1. **Implement sequence decompression**:
-   - Create decompression module using zstandard library
+1. **Implement sequence decompression** (HIGH PRIORITY):
+   - Create `querulus/compression.py` module using zstandard library
    - Load reference genome sequences from config as dictionaries
    - Test decompression with sample sequences from database
    - Handle Base64 decoding of compressed data
+   - Reference: `CompressionService.kt` in Loculus backend
 
 2. **Implement nucleotide sequence endpoint**:
    - Create `GET /{organism}/sample/alignedNucleotideSequences/{segment}`
    - Return sequences in FASTA format
-   - Support filtering, limit, offset
-   - Implement FASTA header templating
+   - Support filtering (same as aggregated/details), limit, offset
+   - Implement FASTA header templating (from config)
    - Stream responses for memory efficiency
+   - Test against LAPIS FASTA output
 
 3. **Implement amino acid sequence endpoint**:
    - Create `GET /{organism}/sample/alignedAminoAcidSequences/{gene}`
    - Similar to nucleotide endpoint but for genes
    - FASTA format with appropriate headers
 
-4. **Add response formatting**:
-   - Support CSV and TSV output formats for aggregated/details
-   - Content negotiation based on Accept header or format parameter
-   - Streaming responses for large result sets
+4. **Implement insertion endpoints**:
+   - `GET /{organism}/sample/nucleotideInsertions`
+   - `GET /{organism}/sample/aminoAcidInsertions`
+   - Return list of insertions with positions and sequences
 
-5. **Additional metadata fields**:
-   - Add support for more computed fields from get-released-data
-   - groupId, groupName, submitter, submissionId
-   - dataUseTerms fields (if enabled)
-   - isRevocation, versionComment
+5. **Add CSV/TSV output formats** (Nice to have):
+   - Support CSV and TSV output formats for aggregated/details
+   - Content negotiation based on Accept header or `format` parameter
+   - Streaming responses for large result sets
 
 ### Phase 1: MVP ✅ COMPLETE
 
 - ✅ QueryBuilder class for translating LAPIS params to SQL
 - ✅ `/sample/aggregated` with field grouping (country, lineage, etc.)
-- ✅ Metadata filtering (WHERE clauses on JSONB fields)
+- ✅ Metadata filtering (WHERE clauses on JSONB fields + computed fields)
 - ✅ `/sample/details` endpoint with field selection
-- ✅ Integration tests comparing against live LAPIS
+- ✅ Integration tests comparing against live LAPIS (17 tests, 100% passing)
 - ✅ Response formatting (JSON)
-- ✅ Computed fields (accessionVersion, timestamps, versionStatus)
+- ✅ All computed fields (accessionVersion, timestamps, versionStatus, earliestReleaseDate, etc.)
 - ✅ Multi-version sequence handling
+- ✅ Filtering by computed fields (versionStatus, earliestReleaseDate)
 
 ### Phase 2: Sequences (Weeks 3-4)
 

@@ -121,18 +121,19 @@ class QueryBuilder:
             "releasedAtTimestamp",
         }
 
-        # Build SELECT clause
-        if selected_fields:
-            # Use quoted identifiers to preserve camelCase
+        # Check if versionStatus is requested
+        needs_version_status = selected_fields and "versionStatus" in selected_fields
+
+        # If we need versionStatus, wrap the query in a CTE to compute it
+        if needs_version_status:
+            # Build SELECT clause for CTE
             select_parts = []
             for field in selected_fields:
-                # Check if it's a direct column
                 if field == "accession":
                     select_parts.append("accession")
                 elif field == "version":
                     select_parts.append("version")
                 elif field == "accessionVersion" or field == "displayName":
-                    # Computed: accession || '.' || version
                     select_parts.append(f"(accession || '.' || version) AS \"{field}\"")
                 elif field == "submittedDate":
                     select_parts.append(f"TO_CHAR(submitted_at, 'YYYY-MM-DD') AS \"{field}\"")
@@ -147,9 +148,21 @@ class QueryBuilder:
                         f"EXTRACT(EPOCH FROM released_at)::bigint AS \"{field}\""
                     )
                 elif field == "versionStatus":
-                    # For now, assume all are LATEST_VERSION
-                    # TODO: Compute based on max version per accession
-                    select_parts.append(f"'LATEST_VERSION' AS \"{field}\"")
+                    # Compute versionStatus using window functions
+                    select_parts.append(f"""
+                        CASE
+                            WHEN version = MAX(version) OVER (PARTITION BY accession) THEN 'LATEST_VERSION'
+                            WHEN EXISTS (
+                                SELECT 1 FROM sequence_entries_view sev2
+                                WHERE sev2.accession = sequence_entries_view.accession
+                                  AND sev2.version > sequence_entries_view.version
+                                  AND sev2.is_revocation = true
+                                  AND sev2.organism = :organism
+                                  AND sev2.released_at IS NOT NULL
+                            ) THEN 'REVOKED'
+                            ELSE 'REVISED'
+                        END AS "{field}"
+                    """)
                 else:
                     # Metadata field from JSONB
                     select_parts.append(
@@ -157,9 +170,37 @@ class QueryBuilder:
                     )
             select_clause = ", ".join(select_parts)
         else:
-            # Return all metadata - expand JSONB into individual columns
-            # For now, return the whole JSONB (we can expand this later)
-            select_clause = "accession, version, joint_metadata -> 'metadata' AS metadata"
+            # Simpler query without versionStatus
+            if selected_fields:
+                select_parts = []
+                for field in selected_fields:
+                    if field == "accession":
+                        select_parts.append("accession")
+                    elif field == "version":
+                        select_parts.append("version")
+                    elif field == "accessionVersion" or field == "displayName":
+                        select_parts.append(f"(accession || '.' || version) AS \"{field}\"")
+                    elif field == "submittedDate":
+                        select_parts.append(f"TO_CHAR(submitted_at, 'YYYY-MM-DD') AS \"{field}\"")
+                    elif field == "submittedAtTimestamp":
+                        select_parts.append(
+                            f"EXTRACT(EPOCH FROM submitted_at)::bigint AS \"{field}\""
+                        )
+                    elif field == "releasedDate":
+                        select_parts.append(f"TO_CHAR(released_at, 'YYYY-MM-DD') AS \"{field}\"")
+                    elif field == "releasedAtTimestamp":
+                        select_parts.append(
+                            f"EXTRACT(EPOCH FROM released_at)::bigint AS \"{field}\""
+                        )
+                    else:
+                        # Metadata field from JSONB
+                        select_parts.append(
+                            f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
+                        )
+                select_clause = ", ".join(select_parts)
+            else:
+                # Return all metadata
+                select_clause = "accession, version, joint_metadata -> 'metadata' AS metadata"
 
         query = f"""
             SELECT {select_clause}

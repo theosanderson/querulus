@@ -80,6 +80,8 @@ async def get_aggregated(
     organism: str,
     request: Request,
     fields: str | None = Query(None, description="Comma-separated list of fields to group by"),
+    limit: int | None = Query(None, description="Maximum number of results"),
+    offset: int = Query(0, description="Number of results to skip"),
 ):
     """
     Get aggregated sequence counts with optional grouping by metadata fields.
@@ -113,7 +115,7 @@ async def get_aggregated(
     # Get database session
     async for db in get_db():
         # Build and execute query
-        query_str, params = builder.build_aggregated_query()
+        query_str, params = builder.build_aggregated_query(limit, offset)
         result = await db.execute(text(query_str), params)
 
         # Format results
@@ -143,6 +145,77 @@ async def get_aggregated(
                 "requestId": request_id,
                 "requestInfo": f"{organism_config.schema['organismName']} on querulus",
                 "queryInfo": "Aggregated query",
+            },
+        }
+
+
+@app.get("/{organism}/sample/details")
+async def get_details(
+    organism: str,
+    request: Request,
+    fields: str | None = Query(None, description="Comma-separated list of fields to return"),
+    limit: int | None = Query(None, description="Maximum number of results"),
+    offset: int = Query(0, description="Number of results to skip"),
+):
+    """
+    Get detailed metadata for sequences.
+
+    Examples:
+    - GET /west-nile/sample/details?limit=10
+    - GET /west-nile/sample/details?fields=accession,geoLocCountry,lineage&limit=5
+    - GET /west-nile/sample/details?geoLocCountry=USA&limit=10
+    """
+    # Validate organism
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+    # Parse fields parameter
+    selected_fields = None
+    if fields:
+        selected_fields = [f.strip() for f in fields.split(",")]
+
+    # Build query using QueryBuilder
+    builder = QueryBuilder(organism)
+
+    # Add filters from query parameters
+    query_params = dict(request.query_params)
+    builder.add_filters_from_params(query_params)
+
+    # Get database session
+    async for db in get_db():
+        # Build and execute query
+        query_str, params = builder.build_details_query(selected_fields, limit, offset)
+        result = await db.execute(text(query_str), params)
+
+        # Format results
+        rows = result.fetchall()
+        data = []
+
+        for row in rows:
+            row_dict = {}
+            # Get all columns from the row
+            for key in row._mapping.keys():
+                value = row._mapping[key]
+                # Convert any non-serializable types
+                if isinstance(value, dict):
+                    row_dict[key] = value
+                else:
+                    row_dict[key] = value
+            data.append(row_dict)
+
+        # Generate request ID
+        request_id = str(uuid.uuid4())
+
+        # Return LAPIS-compatible response
+        return {
+            "data": data,
+            "info": {
+                "dataVersion": "0",  # TODO: Implement versioning
+                "requestId": request_id,
+                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
+                "queryInfo": "Details query",
             },
         }
 

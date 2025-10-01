@@ -36,7 +36,9 @@ class QueryBuilder:
         self.group_by_fields = fields
         return self
 
-    def build_aggregated_query(self) -> tuple[str, dict[str, Any]]:
+    def build_aggregated_query(
+        self, limit: int | None = None, offset: int = 0
+    ) -> tuple[str, dict[str, Any]]:
         """
         Build aggregated count query with optional grouping.
 
@@ -90,6 +92,12 @@ class QueryBuilder:
             query += f"\nGROUP BY {group_by_clause}"
             query += "\nORDER BY count DESC"
 
+            # Add pagination for grouped results
+            if limit is not None:
+                query += f"\nLIMIT {limit}"
+            if offset > 0:
+                query += f"\nOFFSET {offset}"
+
         return query, params
 
     def build_details_query(
@@ -104,15 +112,20 @@ class QueryBuilder:
 
         # Build SELECT clause
         if selected_fields:
-            select_parts = ["accession", "version"]
+            # Use quoted identifiers to preserve camelCase
+            select_parts = []
             for field in selected_fields:
-                select_parts.append(
-                    f"joint_metadata -> 'metadata' ->> '{field}' AS {field}"
-                )
+                # Check if it's a direct column (accession, version) or metadata field
+                if field in ["accession", "version"]:
+                    select_parts.append(field)
+                else:
+                    select_parts.append(
+                        f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
+                    )
             select_clause = ", ".join(select_parts)
         else:
-            # Return all metadata - for now just return the whole JSONB
-            # We'll need to expand this based on organism schema
+            # Return all metadata - expand JSONB into individual columns
+            # For now, return the whole JSONB (we can expand this later)
             select_clause = "accession, version, joint_metadata -> 'metadata' AS metadata"
 
         query = f"""

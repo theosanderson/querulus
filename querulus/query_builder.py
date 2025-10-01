@@ -150,19 +150,44 @@ class QueryBuilder:
         """
         params = {"organism": self.organism}
 
+        # Computed fields that need special handling
+        computed_fields = {
+            "accessionVersion",
+            "displayName",
+            "versionStatus",
+            "submittedDate",
+            "submittedAtTimestamp",
+            "releasedDate",
+            "releasedAtTimestamp",
+            "earliestReleaseDate",
+            "submissionId",
+            "submitter",
+            "groupId",
+            "groupName",
+            "isRevocation",
+            "versionComment",
+            "dataUseTerms",
+            "dataUseTermsRestrictedUntil",
+            "dataUseTermsUrl",
+        }
+
         # Base selection
         if self.group_by_fields:
-            # Check if versionStatus or earliestReleaseDate is one of the grouping fields
+            # Check if versionStatus or earliestReleaseDate is one of the grouping fields OR filters
             # Both require window functions, so we need CTE approach
-            needs_version_status = "versionStatus" in self.group_by_fields
-            needs_earliest_release = "earliestReleaseDate" in self.group_by_fields
+            needs_version_status = "versionStatus" in self.group_by_fields or "versionStatus" in self.filters
+            needs_earliest_release = "earliestReleaseDate" in self.group_by_fields or "earliestReleaseDate" in self.filters
             needs_cte = needs_version_status or needs_earliest_release
 
             if needs_cte:
                 # Need to use a CTE because window functions can't be in GROUP BY
                 # First compute versionStatus for each row, then aggregate
+                # Include both group_by_fields and any filtered computed fields
+                all_fields = set(self.group_by_fields)
+                all_fields.update(f for f in self.filters.keys() if f in computed_fields)
+
                 cte_select_parts = []
-                for field in self.group_by_fields:
+                for field in all_fields:
                     if field == "versionStatus":
                         cte_select_parts.append(f"""
                             CASE
@@ -206,17 +231,29 @@ class QueryBuilder:
                         WHERE organism = :organism
                           AND released_at IS NOT NULL
                 """
-                # Add filters in the CTE
+                # Add non-computed field filters in the CTE
                 if self.filters:
                     for field, value in self.filters.items():
-                        param_name = f"filter_{field}"
-                        query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                        if field not in computed_fields:
+                            param_name = f"filter_{field}"
+                            query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                            params[param_name] = value
 
                 query += f"""
                     )
                     SELECT {select_clause}
                     FROM computed_fields
+                    WHERE 1=1
                 """
+
+                # Add computed field filters in outer WHERE clause
+                if self.filters:
+                    for field, value in self.filters.items():
+                        if field in computed_fields:
+                            param_name = f"filter_{field}"
+                            query += f'\n  AND "{field}" = :{param_name}'
+                            params[param_name] = value
+
                 # Set group_by_clause for later use
                 # We'll add GROUP BY after the query is built
                 query_needs_groupby = True
@@ -247,16 +284,84 @@ class QueryBuilder:
                 query_needs_groupby = True
                 filters_already_applied = False
         else:
-            # Simple count
-            query = """
-                SELECT COUNT(*) as count
-                FROM sequence_entries_view
-                WHERE organism = :organism
-                  AND released_at IS NOT NULL
-            """
-            group_by_clause = None
-            query_needs_groupby = False
-            filters_already_applied = False
+            # Simple count (no grouping)
+            # Check if we need CTE for computed field filters
+            needs_version_status_filter = "versionStatus" in self.filters
+            needs_earliest_release_filter = "earliestReleaseDate" in self.filters
+            needs_cte_for_filter = needs_version_status_filter or needs_earliest_release_filter
+
+            if needs_cte_for_filter:
+                # Build CTE to compute the filtered fields
+                cte_select_parts = []
+                for field in self.filters.keys():
+                    if field == "versionStatus":
+                        cte_select_parts.append(f"""
+                            CASE
+                                WHEN version = MAX(version) OVER (PARTITION BY accession) THEN 'LATEST_VERSION'
+                                WHEN EXISTS (
+                                    SELECT 1 FROM sequence_entries_view sev2
+                                    WHERE sev2.accession = sequence_entries_view.accession
+                                      AND sev2.version > sequence_entries_view.version
+                                      AND sev2.is_revocation = true
+                                      AND sev2.organism = :organism
+                                      AND sev2.released_at IS NOT NULL
+                                ) THEN 'REVOKED'
+                                ELSE 'REVISED'
+                            END AS "{field}"
+                        """)
+                    elif field == "earliestReleaseDate":
+                        earliest_expr = self.build_earliest_release_date_expression()
+                        cte_select_parts.append(
+                            f"TO_CHAR({earliest_expr}, 'YYYY-MM-DD') AS \"{field}\""
+                        )
+
+                cte_select = ", ".join(cte_select_parts)
+
+                query = f"""
+                    WITH computed_fields AS (
+                        SELECT {cte_select}
+                        FROM sequence_entries_view
+                        WHERE organism = :organism
+                          AND released_at IS NOT NULL
+                """
+
+                # Add non-computed field filters in CTE
+                if self.filters:
+                    for field, value in self.filters.items():
+                        if field not in computed_fields:
+                            param_name = f"filter_{field}"
+                            query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                            params[param_name] = value
+
+                query += """
+                    )
+                    SELECT COUNT(*) as count
+                    FROM computed_fields
+                    WHERE 1=1
+                """
+
+                # Add computed field filters in outer query
+                if self.filters:
+                    for field, value in self.filters.items():
+                        if field in computed_fields:
+                            param_name = f"filter_{field}"
+                            query += f'\n  AND "{field}" = :{param_name}'
+                            params[param_name] = value
+
+                filters_already_applied = True
+                group_by_clause = None
+                query_needs_groupby = False
+            else:
+                # Simple count without computed fields
+                query = """
+                    SELECT COUNT(*) as count
+                    FROM sequence_entries_view
+                    WHERE organism = :organism
+                      AND released_at IS NOT NULL
+                """
+                group_by_clause = None
+                query_needs_groupby = False
+                filters_already_applied = False
 
         # Add metadata filters (if not already applied in CTE)
         if self.filters and not filters_already_applied:
@@ -309,14 +414,23 @@ class QueryBuilder:
             "dataUseTermsUrl",
         }
 
-        # Check if versionStatus is requested
-        needs_version_status = selected_fields and "versionStatus" in selected_fields
+        # Check if versionStatus or earliestReleaseDate is requested or filtered
+        needs_version_status = (selected_fields and "versionStatus" in selected_fields) or "versionStatus" in self.filters
+        needs_earliest_release = (selected_fields and "earliestReleaseDate" in selected_fields) or "earliestReleaseDate" in self.filters
 
-        # If we need versionStatus, wrap the query in a CTE to compute it
-        if needs_version_status:
+        # If we need versionStatus or earliestReleaseDate (for selection or filtering), use CTE
+        needs_cte = needs_version_status or needs_earliest_release
+
+        if needs_cte:
+            # Determine all fields we need to compute (selected fields + filtered fields)
+            all_fields = set(selected_fields) if selected_fields else set()
+            all_fields.update(self.filters.keys())
+            # Always include accession for ordering
+            all_fields.add("accession")
+
             # Build SELECT clause for CTE
             select_parts = []
-            for field in selected_fields:
+            for field in all_fields:
                 if field == "accession":
                     select_parts.append("sequence_entries_view.accession AS accession")
                 elif field == "version":
@@ -382,9 +496,75 @@ class QueryBuilder:
                     select_parts.append(
                         f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
                     )
-            select_clause = ", ".join(select_parts)
+            cte_select_clause = ", ".join(select_parts)
+
+            # Determine which fields to select in outer query
+            if selected_fields:
+                outer_select_parts = [f'"{field}"' for field in selected_fields]
+                outer_select_clause = ", ".join(outer_select_parts)
+            else:
+                # Select all computed fields
+                outer_select_clause = "*"
+
+            # Check if we need JOINs in the CTE
+            needs_groups_join = "groupName" in all_fields
+            needs_data_use_terms_join = any(
+                f in all_fields for f in ["dataUseTerms", "dataUseTermsRestrictedUntil", "dataUseTermsUrl"]
+            )
+
+            # Build FROM clause with necessary JOINs
+            from_clause = "FROM sequence_entries_view"
+            if needs_groups_join:
+                from_clause += "\n                    LEFT JOIN groups_table ON sequence_entries_view.group_id = groups_table.group_id"
+            if needs_data_use_terms_join:
+                from_clause += "\n                    LEFT JOIN data_use_terms_table ON sequence_entries_view.accession = data_use_terms_table.accession"
+
+            # Build the CTE query
+            query = f"""
+                WITH computed_fields AS (
+                    SELECT {cte_select_clause}
+                    {from_clause}
+                    WHERE organism = :organism
+                      AND released_at IS NOT NULL
+            """
+
+            # Add metadata filters (only non-computed fields in CTE WHERE clause)
+            if self.filters:
+                for field, value in self.filters.items():
+                    if field not in computed_fields:
+                        # Regular metadata field - filter in CTE
+                        param_name = f"filter_{field}"
+                        query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                        params[param_name] = value
+
+            # Close the CTE and select from it
+            query += f"""
+                )
+                SELECT {outer_select_clause}
+                FROM computed_fields
+                WHERE 1=1
+            """
+
+            # Add computed field filters in outer WHERE clause
+            if self.filters:
+                for field, value in self.filters.items():
+                    if field in computed_fields:
+                        # Computed field - filter in outer query
+                        param_name = f"filter_{field}"
+                        query += f'\n  AND "{field}" = :{param_name}'
+                        params[param_name] = value
+
+            # Add pagination
+            query += "\nORDER BY accession"
+            if limit is not None:
+                query += f"\nLIMIT {limit}"
+            if offset > 0:
+                query += f"\nOFFSET {offset}"
+
+            return query, params
+
         else:
-            # Simpler query without versionStatus
+            # Simpler query without computed fields that need CTE
             if selected_fields:
                 select_parts = []
                 for field in selected_fields:

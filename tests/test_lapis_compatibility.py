@@ -184,8 +184,6 @@ class TestAggregatedEndpoint:
 
     def test_group_by_earliest_release_date(self, config: TestConfig):
         """Test grouping by earliestReleaseDate"""
-        # Note: LAPIS and Querulus may compute earliestReleaseDate slightly differently
-        # due to different database states or timing. We just verify the endpoint works.
         params = {"fields": "earliestReleaseDate"}
 
         lapis_resp = requests.get(config.lapis_endpoint("sample/aggregated"), params=params)
@@ -197,16 +195,8 @@ class TestAggregatedEndpoint:
         lapis_data = lapis_resp.json()["data"]
         querulus_data = querulus_resp.json()["data"]
 
-        # Verify both return results with earliestReleaseDate field
-        assert len(lapis_data) > 0, "LAPIS returned no results"
-        assert len(querulus_data) > 0, "Querulus returned no results"
-
-        # Verify structure - each result should have earliestReleaseDate and count
-        for item in querulus_data[:5]:
-            assert "earliestReleaseDate" in item, f"Missing earliestReleaseDate in {item}"
-            assert "count" in item, f"Missing count in {item}"
-            assert isinstance(item["earliestReleaseDate"], str), "earliestReleaseDate should be a string"
-            assert isinstance(item["count"], int), "count should be an integer"
+        # Results may be in different order, so compare as sets
+        assert compare_counts(lapis_data, querulus_data), "earliestReleaseDate grouping results don't match"
 
 
 class TestDetailsEndpoint:

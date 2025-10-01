@@ -29,8 +29,8 @@ This file tracks implementation progress for the Querulus project. It should be 
 ## Current Status
 
 **Date**: 2025-10-02
-**Phase**: MVP Development - Phase 1 COMPLETE
-**Working On**: Core metadata endpoints fully implemented
+**Phase**: MVP Development - Phase 1 COMPLETE + Testing Infrastructure
+**Working On**: All metadata endpoints working + Comprehensive test suite added
 
 ### Completed Tasks
 
@@ -104,6 +104,18 @@ This file tracks implementation progress for the Querulus project. It should be 
   - submissionId, submitter, groupId, isRevocation, versionComment
   - groupName (with JOIN to groups_table)
   - dataUseTerms, dataUseTermsRestrictedUntil, dataUseTermsUrl
+- ✅ **Comprehensive test suite** (tests/test_lapis_compatibility.py):
+  - 17 integration tests comparing Querulus vs LAPIS
+  - All tests passing (100% success rate)
+  - Tests cover: aggregated, details, computed fields, filtering, pagination
+  - Can be run with: `python -m pytest tests/test_lapis_compatibility.py -v`
+
+#### Bug Fixes ✅
+- ✅ **Computed field filtering support** (2025-10-02):
+  - Fixed filtering by versionStatus, earliestReleaseDate, and other computed fields
+  - Uses CTE approach: compute fields in inner query, filter in outer query
+  - Regular metadata fields filter in CTE WHERE, computed fields filter in outer WHERE
+  - Works for both aggregated and details endpoints
 
 ### Current Working State
 
@@ -114,7 +126,9 @@ This file tracks implementation progress for the Querulus project. It should be 
 - Both aggregated and details endpoints fully working
 - Returns accurate counts and metadata matching LAPIS exactly
 - Handles multi-version sequences correctly
-- All computed fields working (accessionVersion, timestamps, versionStatus)
+- All computed fields working (accessionVersion, timestamps, versionStatus, earliestReleaseDate)
+- Filtering by computed fields now fully supported
+- 17/17 integration tests passing
 
 ### Key Findings
 

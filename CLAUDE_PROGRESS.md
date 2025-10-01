@@ -29,17 +29,38 @@ This file tracks implementation progress for the Querulus project. It should be 
 ## Current Status
 
 **Date**: 2025-10-01
-**Phase**: Planning Complete
-**Working On**: Planning and architecture design
+**Phase**: MVP Development - Phase 1
+**Working On**: Core aggregated and details endpoints
 
 ### Completed Tasks
 
+#### Planning & Architecture ✅
 - ✅ Analyzed LAPIS API specification
 - ✅ Examined Loculus database schema
 - ✅ Studied LAPIS source code and architecture
 - ✅ Connected to PostgreSQL database and explored schema
 - ✅ Analyzed sequence compression implementation (Zstandard with dictionary compression)
 - ✅ Created comprehensive PLAN.md with full architecture and implementation strategy
+
+#### Initial Implementation ✅
+- ✅ Set up Python project structure with pyproject.toml
+- ✅ Created configuration loading module (config.py)
+- ✅ Created Kubernetes ConfigMap template (querulus-config.yaml)
+- ✅ Generated querulus_config.json from helm template
+- ✅ Implemented async PostgreSQL connection pool (database.py)
+- ✅ Created FastAPI application with lifespan management (main.py)
+- ✅ Implemented health check endpoints (/health, /ready)
+- ✅ **Implemented first working endpoint: `GET /{organism}/sample/aggregated`**
+- ✅ **VERIFIED: Returns 8324 sequences for west-nile (exact match with LAPIS!)**
+
+### Current Working State
+
+**Querulus is running successfully!** 🎉
+
+- Server running on `localhost:8000`
+- Successfully connects to PostgreSQL database
+- Basic aggregation endpoint working
+- Returns accurate counts matching LAPIS exactly
 
 ### Key Findings
 
@@ -76,31 +97,34 @@ This file tracks implementation progress for the Querulus project. It should be 
 
 ### Immediate (Next Session)
 
-1. **Set up Python project structure**:
-   - Create `querulus/` directory
-   - Set up pyproject.toml with dependencies (fastapi, uvicorn, asyncpg, sqlalchemy, zstandard)
-   - Create basic FastAPI app skeleton
-   - Set up development environment
+1. **Expand aggregated endpoint**:
+   - Add support for `fields` parameter (group by country, lineage, etc.)
+   - Implement metadata filtering (WHERE clauses on JSONB fields)
+   - Add `orderBy`, `limit`, `offset` parameters
+   - Test with: `GET /west-nile/sample/aggregated?fields=geoLocCountry`
 
-2. **Create Kubernetes ConfigMap for Querulus**:
-   - Create `kubernetes/loculus/templates/querulus-config.yaml`
-   - Reuse `generateBackendConfig` helper to generate config with reference genomes
-   - Test with `helm template` to verify output
+2. **Implement details endpoint**:
+   - Create `GET /{organism}/sample/details`
+   - Support `fields` parameter for field selection
+   - Implement filtering same as aggregated
+   - Return metadata in LAPIS-compatible format
+   - Test against LAPIS to verify field names match
 
-3. **Implement configuration loading**:
-   - Create `config.py` module to load querulus_config.json
-   - Parse organism configs and reference genomes
-   - Create SequenceDecompressor class
+3. **Add response formatting**:
+   - Support CSV and TSV output formats
+   - Content negotiation based on Accept header or format parameter
+   - Streaming responses for large result sets
 
-4. **Database connection**:
-   - Set up async PostgreSQL connection pool
-   - Create database session dependency for FastAPI
-   - Test basic query: `SELECT COUNT(*) FROM sequence_entries_view WHERE organism='west-nile'`
+4. **Query builder abstraction**:
+   - Create `QueryBuilder` class to translate LAPIS params to SQL
+   - Handle JSONB operators for metadata fields
+   - Support numerical comparisons (>, <, >=, <=)
+   - Date range filtering
 
-5. **First endpoint - Simple aggregation**:
-   - Implement `GET /west-nile/sample/aggregated` (no filters)
-   - Return total count in LAPIS response format
-   - Add basic error handling
+5. **Testing & validation**:
+   - Write integration tests comparing Querulus vs LAPIS
+   - Test edge cases (empty results, invalid organisms, etc.)
+   - Performance testing with EXPLAIN ANALYZE
 
 ### Phase 1: MVP (Weeks 1-2)
 
@@ -154,6 +178,22 @@ This file tracks implementation progress for the Querulus project. It should be 
 
 ## Useful Commands
 
+### Running Querulus
+
+```bash
+# Start server (foreground)
+cd /Users/theosanderson/querulus
+python -m querulus.main
+
+# Start server (background)
+python -m querulus.main &
+
+# Test endpoints
+curl http://localhost:8000/
+curl http://localhost:8000/health
+curl http://localhost:8000/west-nile/sample/aggregated
+```
+
 ### Database Queries
 
 ```bash
@@ -178,28 +218,36 @@ WHERE organism = 'west-nile'
 LIMIT 5;
 ```
 
-### Kubernetes/Helm
+### Regenerating Config
 
 ```bash
-# Generate Loculus backend config
-cd kubernetes
-helm template loculus . --set environment=main | grep -A 50 "kind: ConfigMap"
-
-# Port-forward to PostgreSQL
-kubectl port-forward -n prev-main $(kubectl get pods -n prev-main -l app=postgres -o name) 5432:5432
+# Generate querulus_config.json from helm template
+cd loculus/kubernetes
+helm template test-release loculus/ --set environment=server 2>&1 | python3 -c "
+import sys, json
+content = sys.stdin.read()
+start_idx = content.find('querulus_config.json: |')
+json_start = content.find('\n', start_idx) + 1
+json_end = content.find('\n---', json_start)
+lines = content[json_start:json_end].split('\n')
+cleaned = [line[4:] if line.startswith('    ') else line for line in lines]
+data = json.loads('\n'.join(cleaned).strip())
+print(json.dumps(data, indent=2))
+" > ../../config/querulus_config.json
 ```
 
 ### Testing Against LAPIS
 
 ```bash
-# Test aggregated endpoint
-curl https://lapis-main.loculus.org/west-nile/sample/aggregated
+# Compare counts
+echo "LAPIS:" && curl -s https://lapis-main.loculus.org/west-nile/sample/aggregated | jq '.data[0].count'
+echo "Querulus:" && curl -s http://localhost:8000/west-nile/sample/aggregated | jq '.data[0].count'
 
 # Test details endpoint
-curl https://lapis-main.loculus.org/west-nile/sample/details?limit=5
+curl https://lapis-main.loculus.org/west-nile/sample/details?limit=5 | jq
 
 # Test with filters
-curl "https://lapis-main.loculus.org/west-nile/sample/aggregated?country=USA"
+curl "https://lapis-main.loculus.org/west-nile/sample/aggregated?fields=geoLocCountry"
 ```
 
 ---
@@ -254,9 +302,38 @@ Target SLOs (from PLAN.md):
 
 ## Notes for Next Claude
 
+### Quick Start
+- **Server is already implemented and working!** Run: `python -m querulus.main`
+- Basic aggregated endpoint working: `curl http://localhost:8000/west-nile/sample/aggregated`
+- Returns 8324 sequences (verified exact match with LAPIS)
+
+### Key Files
+- `querulus/main.py` - FastAPI app with basic aggregated endpoint
+- `querulus/config.py` - Configuration loading (backend config + reference genomes)
+- `querulus/database.py` - Async PostgreSQL connection pool
+- `config/querulus_config.json` - Generated from helm template (gitignored)
+
+### Architecture
 - PLAN.md contains full architecture and implementation strategy
 - Database schema is well-documented in PLAN.md Appendix A
 - Compression algorithm is Zstandard with dictionary compression (reference genome as dict)
 - Focus on MVP: aggregated + details endpoints first, sequences later
-- Test database is at localhost:5432, database=loculus, user=postgres, password=unsecure
+
+### Environment
+- Test database: localhost:5432, database=loculus, user=postgres, password=unsecure
 - Live LAPIS for testing: https://lapis-main.loculus.org/west-nile/
+- Config generated from: `loculus/kubernetes/loculus/templates/querulus-config.yaml`
+
+### What's Working
+- ✅ Server starts successfully and loads config
+- ✅ Database connection pool initialized
+- ✅ Health checks working (/health, /ready)
+- ✅ Basic aggregated endpoint (total count only)
+- ✅ Accurate results matching LAPIS
+
+### What Needs Work
+- ❌ Aggregated with field grouping (e.g., `?fields=geoLocCountry`)
+- ❌ Metadata filtering
+- ❌ Details endpoint
+- ❌ Sequence endpoints
+- ❌ Multiple output formats (CSV, TSV, FASTA)

@@ -31,3 +31,5 @@ htmlcov/
 
 # Config (in development, mount from ConfigMap in production)
 config/querulus_config.json
+
+# Note: LAPIS and loculus are git submodules - tracked separately

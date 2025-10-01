@@ -35,6 +35,7 @@ class ReferenceGenome(BaseModel):
 class OrganismConfig(BaseModel):
     referenceGenome: ReferenceGenome
     schema: dict[str, Any]  # Full schema config
+    backend_config: dict[str, Any] | None = None  # Reference to backend config (will be set after loading)
 
 
 class BackendConfig(BaseModel):
@@ -42,6 +43,7 @@ class BackendConfig(BaseModel):
     accessionPrefix: str
     websiteUrl: str
     backendUrl: str
+    dataUseTerms: dict[str, Any] | None = None
 
 
 class Settings(BaseSettings):
@@ -78,6 +80,12 @@ class Config:
             config_data = json.load(f)
 
         self.backend_config = BackendConfig(**config_data)
+
+        # Set backend_config reference in each OrganismConfig
+        for organism_config in self.backend_config.organisms.values():
+            organism_config.backend_config = {
+                'dataUseTerms': config_data.get('dataUseTerms', {})
+            }
 
     def get_organism_config(self, organism: str) -> OrganismConfig:
         """Get configuration for a specific organism"""

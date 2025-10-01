@@ -8,8 +8,9 @@ from sqlalchemy.sql import Select
 class QueryBuilder:
     """Builds SQL queries from LAPIS-style parameters"""
 
-    def __init__(self, organism: str):
+    def __init__(self, organism: str, organism_config: Any = None):
         self.organism = organism
+        self.organism_config = organism_config
         self.filters: dict[str, Any] = {}
         self.group_by_fields: list[str] = []
 
@@ -36,6 +37,109 @@ class QueryBuilder:
         self.group_by_fields = fields
         return self
 
+    def build_earliest_release_date_expression(self) -> str:
+        """
+        Build SQL expression for earliestReleaseDate.
+
+        Returns the LEAST of:
+        - released_at
+        - any configured external date fields
+        - minimum earliestReleaseDate from previous versions
+        """
+        if not self.organism_config:
+            # Fallback to just released_at if no config
+            return "released_at"
+
+        earliest_config = self.organism_config.schema.get('earliestReleaseDate', {})
+        if not earliest_config.get('enabled', False):
+            return "released_at"
+
+        external_fields = earliest_config.get('externalFields', [])
+
+        # Build LEAST expression with released_at and external fields
+        parts = ["released_at"]
+        for field in external_fields:
+            # Convert string date to timestamp, handle NULL
+            parts.append(
+                f"(joint_metadata -> 'metadata' ->> '{field}')::timestamp"
+            )
+
+        # Also need to consider earliestReleaseDate from earlier versions
+        # Use window function to get the minimum across all versions of this accession
+        least_expr = "LEAST(" + ", ".join(parts) + ")"
+
+        # Apply window function to get minimum across versions
+        # This ensures later versions inherit earlier earliestReleaseDate
+        return f"LEAST({least_expr}, MIN({least_expr}) OVER (PARTITION BY accession ORDER BY version ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))"
+
+    def build_data_use_terms_expression(self) -> str:
+        """
+        Build SQL expression for dataUseTerms field.
+        Returns 'OPEN' if not restricted or if restriction has expired, else 'RESTRICTED'.
+        """
+        if not self.organism_config:
+            return "'OPEN'"
+
+        # Check if dataUseTerms are enabled in config
+        data_use_terms_config = self.organism_config.backend_config.get('dataUseTerms', {})
+        if not data_use_terms_config.get('enabled', False):
+            return "'OPEN'"
+
+        return """
+            CASE
+                WHEN data_use_terms_table.data_use_terms_type = 'RESTRICTED'
+                     AND data_use_terms_table.restricted_until > NOW()
+                THEN 'RESTRICTED'
+                ELSE 'OPEN'
+            END
+        """
+
+    def build_data_use_terms_restricted_until_expression(self) -> str:
+        """
+        Build SQL expression for dataUseTermsRestrictedUntil field.
+        Returns the restriction date if currently restricted, else NULL.
+        """
+        if not self.organism_config:
+            return "NULL"
+
+        data_use_terms_config = self.organism_config.backend_config.get('dataUseTerms', {})
+        if not data_use_terms_config.get('enabled', False):
+            return "NULL"
+
+        return """
+            CASE
+                WHEN data_use_terms_table.data_use_terms_type = 'RESTRICTED'
+                     AND data_use_terms_table.restricted_until > NOW()
+                THEN TO_CHAR(data_use_terms_table.restricted_until, 'YYYY-MM-DD')
+                ELSE NULL
+            END
+        """
+
+    def build_data_use_terms_url_expression(self) -> str:
+        """
+        Build SQL expression for dataUseTermsUrl field.
+        Returns the appropriate URL based on data use terms status.
+        """
+        if not self.organism_config:
+            return "NULL"
+
+        data_use_terms_config = self.organism_config.backend_config.get('dataUseTerms', {})
+        if not data_use_terms_config.get('enabled', False):
+            return "NULL"
+
+        urls = data_use_terms_config.get('urls', {})
+        open_url = urls.get('open', '')
+        restricted_url = urls.get('restricted', '')
+
+        return f"""
+            CASE
+                WHEN data_use_terms_table.data_use_terms_type = 'RESTRICTED'
+                     AND data_use_terms_table.restricted_until > NOW()
+                THEN '{restricted_url}'
+                ELSE '{open_url}'
+            END
+        """
+
     def build_aggregated_query(
         self, limit: int | None = None, offset: int = 0
     ) -> tuple[str, dict[str, Any]]:
@@ -48,10 +152,13 @@ class QueryBuilder:
 
         # Base selection
         if self.group_by_fields:
-            # Check if versionStatus is one of the grouping fields
+            # Check if versionStatus or earliestReleaseDate is one of the grouping fields
+            # Both require window functions, so we need CTE approach
             needs_version_status = "versionStatus" in self.group_by_fields
+            needs_earliest_release = "earliestReleaseDate" in self.group_by_fields
+            needs_cte = needs_version_status or needs_earliest_release
 
-            if needs_version_status:
+            if needs_cte:
                 # Need to use a CTE because window functions can't be in GROUP BY
                 # First compute versionStatus for each row, then aggregate
                 cte_select_parts = []
@@ -71,6 +178,11 @@ class QueryBuilder:
                                 ELSE 'REVISED'
                             END AS "{field}"
                         """)
+                    elif field == "earliestReleaseDate":
+                        earliest_expr = self.build_earliest_release_date_expression()
+                        cte_select_parts.append(
+                            f"TO_CHAR({earliest_expr}, 'YYYY-MM-DD') AS \"{field}\""
+                        )
                     else:
                         cte_select_parts.append(
                             f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
@@ -185,6 +297,16 @@ class QueryBuilder:
             "submittedAtTimestamp",
             "releasedDate",
             "releasedAtTimestamp",
+            "earliestReleaseDate",
+            "submissionId",
+            "submitter",
+            "groupId",
+            "groupName",
+            "isRevocation",
+            "versionComment",
+            "dataUseTerms",
+            "dataUseTermsRestrictedUntil",
+            "dataUseTermsUrl",
         }
 
         # Check if versionStatus is requested
@@ -196,7 +318,7 @@ class QueryBuilder:
             select_parts = []
             for field in selected_fields:
                 if field == "accession":
-                    select_parts.append("accession")
+                    select_parts.append("sequence_entries_view.accession AS accession")
                 elif field == "version":
                     select_parts.append("version")
                 elif field == "accessionVersion" or field == "displayName":
@@ -229,6 +351,32 @@ class QueryBuilder:
                             ELSE 'REVISED'
                         END AS "{field}"
                     """)
+                elif field == "earliestReleaseDate":
+                    earliest_expr = self.build_earliest_release_date_expression()
+                    select_parts.append(
+                        f"TO_CHAR({earliest_expr}, 'YYYY-MM-DD') AS \"{field}\""
+                    )
+                elif field == "submissionId":
+                    select_parts.append(f'submission_id AS "{field}"')
+                elif field == "submitter":
+                    select_parts.append(f'submitter AS "{field}"')
+                elif field == "groupId":
+                    select_parts.append(f'sequence_entries_view.group_id AS "{field}"')
+                elif field == "isRevocation":
+                    select_parts.append(f'is_revocation AS "{field}"')
+                elif field == "versionComment":
+                    select_parts.append(f'version_comment AS "{field}"')
+                elif field == "groupName":
+                    select_parts.append(f'groups_table.group_name AS "{field}"')
+                elif field == "dataUseTerms":
+                    data_use_expr = self.build_data_use_terms_expression()
+                    select_parts.append(f'({data_use_expr}) AS "{field}"')
+                elif field == "dataUseTermsRestrictedUntil":
+                    restricted_until_expr = self.build_data_use_terms_restricted_until_expression()
+                    select_parts.append(f'({restricted_until_expr}) AS "{field}"')
+                elif field == "dataUseTermsUrl":
+                    url_expr = self.build_data_use_terms_url_expression()
+                    select_parts.append(f'({url_expr}) AS "{field}"')
                 else:
                     # Metadata field from JSONB
                     select_parts.append(
@@ -241,7 +389,7 @@ class QueryBuilder:
                 select_parts = []
                 for field in selected_fields:
                     if field == "accession":
-                        select_parts.append("accession")
+                        select_parts.append("sequence_entries_view.accession AS accession")
                     elif field == "version":
                         select_parts.append("version")
                     elif field == "accessionVersion" or field == "displayName":
@@ -258,6 +406,32 @@ class QueryBuilder:
                         select_parts.append(
                             f"EXTRACT(EPOCH FROM released_at)::bigint AS \"{field}\""
                         )
+                    elif field == "earliestReleaseDate":
+                        earliest_expr = self.build_earliest_release_date_expression()
+                        select_parts.append(
+                            f"TO_CHAR({earliest_expr}, 'YYYY-MM-DD') AS \"{field}\""
+                        )
+                    elif field == "submissionId":
+                        select_parts.append(f'submission_id AS "{field}"')
+                    elif field == "submitter":
+                        select_parts.append(f'submitter AS "{field}"')
+                    elif field == "groupId":
+                        select_parts.append(f'sequence_entries_view.group_id AS "{field}"')
+                    elif field == "isRevocation":
+                        select_parts.append(f'is_revocation AS "{field}"')
+                    elif field == "versionComment":
+                        select_parts.append(f'version_comment AS "{field}"')
+                    elif field == "groupName":
+                        select_parts.append(f'groups_table.group_name AS "{field}"')
+                    elif field == "dataUseTerms":
+                        data_use_expr = self.build_data_use_terms_expression()
+                        select_parts.append(f'({data_use_expr}) AS "{field}"')
+                    elif field == "dataUseTermsRestrictedUntil":
+                        restricted_until_expr = self.build_data_use_terms_restricted_until_expression()
+                        select_parts.append(f'({restricted_until_expr}) AS "{field}"')
+                    elif field == "dataUseTermsUrl":
+                        url_expr = self.build_data_use_terms_url_expression()
+                        select_parts.append(f'({url_expr}) AS "{field}"')
                     else:
                         # Metadata field from JSONB
                         select_parts.append(
@@ -268,9 +442,22 @@ class QueryBuilder:
                 # Return all metadata
                 select_clause = "accession, version, joint_metadata -> 'metadata' AS metadata"
 
+        # Check if we need JOINs
+        needs_groups_join = selected_fields and "groupName" in selected_fields
+        needs_data_use_terms_join = selected_fields and any(
+            f in selected_fields for f in ["dataUseTerms", "dataUseTermsRestrictedUntil", "dataUseTermsUrl"]
+        )
+
+        # Build FROM clause with necessary JOINs
+        from_clause = "FROM sequence_entries_view"
+        if needs_groups_join:
+            from_clause += "\n                LEFT JOIN groups_table ON sequence_entries_view.group_id = groups_table.group_id"
+        if needs_data_use_terms_join:
+            from_clause += "\n                LEFT JOIN data_use_terms_table ON sequence_entries_view.accession = data_use_terms_table.accession"
+
         query = f"""
             SELECT {select_clause}
-            FROM sequence_entries_view
+            {from_clause}
             WHERE organism = :organism
               AND released_at IS NOT NULL
         """
@@ -283,7 +470,7 @@ class QueryBuilder:
                 params[param_name] = value
 
         # Add pagination
-        query += "\nORDER BY accession"
+        query += "\nORDER BY sequence_entries_view.accession"
         if limit is not None:
             query += f"\nLIMIT {limit}"
         if offset > 0:

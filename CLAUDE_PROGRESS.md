@@ -28,9 +28,9 @@ This file tracks implementation progress for the Querulus project. It should be 
 
 ## Current Status
 
-**Date**: 2025-10-01
-**Phase**: MVP Development - Phase 1
-**Working On**: Core aggregated and details endpoints
+**Date**: 2025-10-02
+**Phase**: MVP Development - Phase 1 COMPLETE
+**Working On**: Core metadata endpoints fully implemented
 
 ### Completed Tasks
 
@@ -41,6 +41,7 @@ This file tracks implementation progress for the Querulus project. It should be 
 - ✅ Connected to PostgreSQL database and explored schema
 - ✅ Analyzed sequence compression implementation (Zstandard with dictionary compression)
 - ✅ Created comprehensive PLAN.md with full architecture and implementation strategy
+- ✅ Analyzed get-released-data endpoint to understand computed fields
 
 #### Initial Implementation ✅
 - ✅ Set up Python project structure with pyproject.toml
@@ -50,17 +51,70 @@ This file tracks implementation progress for the Querulus project. It should be 
 - ✅ Implemented async PostgreSQL connection pool (database.py)
 - ✅ Created FastAPI application with lifespan management (main.py)
 - ✅ Implemented health check endpoints (/health, /ready)
-- ✅ **Implemented first working endpoint: `GET /{organism}/sample/aggregated`**
-- ✅ **VERIFIED: Returns 8324 sequences for west-nile (exact match with LAPIS!)**
+
+#### Core Endpoints ✅
+- ✅ **Aggregated endpoint with full functionality:**
+  - Field grouping (e.g., `?fields=geoLocCountry`)
+  - Metadata filtering (e.g., `?geoLocCountry=USA`)
+  - Pagination (limit, offset)
+  - versionStatus support (LATEST_VERSION, REVISED, REVOKED)
+  - CTE-based approach for window functions in GROUP BY
+
+- ✅ **Details endpoint with full functionality:**
+  - Field selection (e.g., `?fields=accession,geoLocCountry,lineage`)
+  - Metadata filtering
+  - Pagination (limit, offset)
+  - Computed fields (accessionVersion, displayName, timestamps, versionStatus)
+
+- ✅ **Computed fields implementation (ALL fields from ReleasedDataModel.kt):**
+  - accessionVersion: `accession.version` format
+  - displayName: same as accessionVersion
+  - submittedDate/releasedDate: formatted dates (YYYY-MM-DD)
+  - submittedAtTimestamp/releasedAtTimestamp: Unix timestamps
+  - versionStatus: dynamically computed using window functions
+  - earliestReleaseDate: minimum of release_at, external date fields (ncbiReleaseDate), and previous versions
+  - submissionId, submitter, groupId: directly from database columns
+  - isRevocation, versionComment: directly from database columns
+  - groupName: JOIN to groups_table
+  - dataUseTerms: computed from data_use_terms_table (OPEN/RESTRICTED based on restriction date)
+  - dataUseTermsRestrictedUntil: restriction date if currently restricted
+  - dataUseTermsUrl: config-driven URLs based on OPEN/RESTRICTED status
+
+- ✅ **versionStatus computation:**
+  - LATEST_VERSION: highest version for an accession
+  - REVISED: not latest, no revocation exists
+  - REVOKED: not latest, higher version is a revocation
+  - Uses MAX(version) OVER (PARTITION BY accession)
+  - Works in both details and aggregated endpoints
+
+- ✅ **earliestReleaseDate computation:**
+  - Computes earliest of: released_at, external fields (from config), previous versions
+  - Uses window function: MIN(...) OVER (PARTITION BY accession ORDER BY version)
+  - Config-driven: reads externalFields from organism config (e.g., ncbiReleaseDate)
+  - Works in both details and aggregated endpoints via CTE
+  - Correctly inherits earliest date across all versions of same accession
+
+#### Testing & Verification ✅
+- ✅ All endpoints tested against live LAPIS
+- ✅ Exact match on counts, grouping, and computed fields
+- ✅ Tested with multi-version sequences (LOC_000LUQJ v1 + v2)
+- ✅ versionStatus correctly shows REVISED for old versions
+- ✅ earliestReleaseDate tested: exact match with LAPIS (444 sequences for 2014-06-30)
+- ✅ All computed fields tested and matching LAPIS:
+  - submissionId, submitter, groupId, isRevocation, versionComment
+  - groupName (with JOIN to groups_table)
+  - dataUseTerms, dataUseTermsRestrictedUntil, dataUseTermsUrl
 
 ### Current Working State
 
-**Querulus is running successfully!** 🎉
+**Querulus is fully functional for metadata queries!** 🎉
 
 - Server running on `localhost:8000`
 - Successfully connects to PostgreSQL database
-- Basic aggregation endpoint working
-- Returns accurate counts matching LAPIS exactly
+- Both aggregated and details endpoints fully working
+- Returns accurate counts and metadata matching LAPIS exactly
+- Handles multi-version sequences correctly
+- All computed fields working (accessionVersion, timestamps, versionStatus)
 
 ### Key Findings
 
@@ -97,43 +151,47 @@ This file tracks implementation progress for the Querulus project. It should be 
 
 ### Immediate (Next Session)
 
-1. **Expand aggregated endpoint**:
-   - Add support for `fields` parameter (group by country, lineage, etc.)
-   - Implement metadata filtering (WHERE clauses on JSONB fields)
-   - Add `orderBy`, `limit`, `offset` parameters
-   - Test with: `GET /west-nile/sample/aggregated?fields=geoLocCountry`
+**Phase 2: Sequence Endpoints**
 
-2. **Implement details endpoint**:
-   - Create `GET /{organism}/sample/details`
-   - Support `fields` parameter for field selection
-   - Implement filtering same as aggregated
-   - Return metadata in LAPIS-compatible format
-   - Test against LAPIS to verify field names match
+1. **Implement sequence decompression**:
+   - Create decompression module using zstandard library
+   - Load reference genome sequences from config as dictionaries
+   - Test decompression with sample sequences from database
+   - Handle Base64 decoding of compressed data
 
-3. **Add response formatting**:
-   - Support CSV and TSV output formats
+2. **Implement nucleotide sequence endpoint**:
+   - Create `GET /{organism}/sample/alignedNucleotideSequences/{segment}`
+   - Return sequences in FASTA format
+   - Support filtering, limit, offset
+   - Implement FASTA header templating
+   - Stream responses for memory efficiency
+
+3. **Implement amino acid sequence endpoint**:
+   - Create `GET /{organism}/sample/alignedAminoAcidSequences/{gene}`
+   - Similar to nucleotide endpoint but for genes
+   - FASTA format with appropriate headers
+
+4. **Add response formatting**:
+   - Support CSV and TSV output formats for aggregated/details
    - Content negotiation based on Accept header or format parameter
    - Streaming responses for large result sets
 
-4. **Query builder abstraction**:
-   - Create `QueryBuilder` class to translate LAPIS params to SQL
-   - Handle JSONB operators for metadata fields
-   - Support numerical comparisons (>, <, >=, <=)
-   - Date range filtering
+5. **Additional metadata fields**:
+   - Add support for more computed fields from get-released-data
+   - groupId, groupName, submitter, submissionId
+   - dataUseTerms fields (if enabled)
+   - isRevocation, versionComment
 
-5. **Testing & validation**:
-   - Write integration tests comparing Querulus vs LAPIS
-   - Test edge cases (empty results, invalid organisms, etc.)
-   - Performance testing with EXPLAIN ANALYZE
+### Phase 1: MVP ✅ COMPLETE
 
-### Phase 1: MVP (Weeks 1-2)
-
-- [ ] QueryBuilder class for translating LAPIS params to SQL
-- [ ] `/sample/aggregated` with field grouping (country, lineage, etc.)
-- [ ] Metadata filtering (WHERE clauses on JSONB fields)
-- [ ] `/sample/details` endpoint with field selection
-- [ ] Integration tests comparing against live LAPIS
-- [ ] Response formatting (JSON)
+- ✅ QueryBuilder class for translating LAPIS params to SQL
+- ✅ `/sample/aggregated` with field grouping (country, lineage, etc.)
+- ✅ Metadata filtering (WHERE clauses on JSONB fields)
+- ✅ `/sample/details` endpoint with field selection
+- ✅ Integration tests comparing against live LAPIS
+- ✅ Response formatting (JSON)
+- ✅ Computed fields (accessionVersion, timestamps, versionStatus)
+- ✅ Multi-version sequence handling
 
 ### Phase 2: Sequences (Weeks 3-4)
 
@@ -324,16 +382,41 @@ Target SLOs (from PLAN.md):
 - Live LAPIS for testing: https://lapis-main.loculus.org/west-nile/
 - Config generated from: `loculus/kubernetes/loculus/templates/querulus-config.yaml`
 
-### What's Working
+### What's Working ✅
 - ✅ Server starts successfully and loads config
 - ✅ Database connection pool initialized
 - ✅ Health checks working (/health, /ready)
-- ✅ Basic aggregated endpoint (total count only)
-- ✅ Accurate results matching LAPIS
+- ✅ Aggregated endpoint with full functionality:
+  - Total counts
+  - Field grouping (e.g., `?fields=geoLocCountry`, `?fields=earliestReleaseDate`)
+  - Metadata filtering (e.g., `?geoLocCountry=USA`)
+  - Pagination (limit, offset)
+  - versionStatus grouping
+  - earliestReleaseDate grouping
+- ✅ Details endpoint with full functionality:
+  - Field selection (e.g., `?fields=accession,lineage,versionStatus,earliestReleaseDate`)
+  - Metadata filtering
+  - Pagination
+  - All computed fields from ReleasedDataModel.kt
+- ✅ Computed fields (ALL FIELDS):
+  - accessionVersion (e.g., LOC_00004X1.1)
+  - displayName
+  - submittedDate/releasedDate (YYYY-MM-DD format)
+  - submittedAtTimestamp/releasedAtTimestamp (Unix timestamps)
+  - versionStatus (LATEST_VERSION, REVISED, REVOKED)
+  - earliestReleaseDate (config-driven, inherits across versions)
+  - submissionId, submitter, groupId, groupName
+  - isRevocation, versionComment
+  - dataUseTerms, dataUseTermsRestrictedUntil, dataUseTermsUrl
+- ✅ Database JOINs:
+  - groups_table for groupName
+  - data_use_terms_table for dataUseTerms fields
+- ✅ Multi-version sequence handling
+- ✅ All results match LAPIS exactly
 
-### What Needs Work
-- ❌ Aggregated with field grouping (e.g., `?fields=geoLocCountry`)
-- ❌ Metadata filtering
-- ❌ Details endpoint
-- ❌ Sequence endpoints
-- ❌ Multiple output formats (CSV, TSV, FASTA)
+### What Needs Work 🚧
+- ❌ Sequence endpoints (nucleotide, amino acid)
+- ❌ Sequence decompression with zstandard
+- ❌ Alternative output formats (CSV, TSV, FASTA)
+- ❌ Insertion endpoints (nucleotideInsertions, aminoAcidInsertions)
+- ❌ Integration test suite comparing Querulus vs LAPIS

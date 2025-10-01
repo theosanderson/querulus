@@ -104,7 +104,7 @@ async def get_aggregated(
         group_by_fields = [f.strip() for f in fields.split(",")]
 
     # Build query using QueryBuilder
-    builder = QueryBuilder(organism)
+    builder = QueryBuilder(organism, organism_config)
     builder.set_group_by_fields(group_by_fields)
 
     # Add filters from query parameters
@@ -177,7 +177,7 @@ async def get_details(
         selected_fields = [f.strip() for f in fields.split(",")]
 
     # Build query using QueryBuilder
-    builder = QueryBuilder(organism)
+    builder = QueryBuilder(organism, organism_config)
 
     # Add filters from query parameters
     query_params = dict(request.query_params)

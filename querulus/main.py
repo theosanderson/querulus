@@ -3,13 +3,14 @@
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from querulus.config import config
 from querulus.database import init_db, close_db, get_db, health_check
+from querulus.query_builder import QueryBuilder
 
 
 @asynccontextmanager
@@ -75,12 +76,19 @@ async def ready():
 
 
 @app.get("/{organism}/sample/aggregated")
-async def get_aggregated(organism: str, request: Request):
+async def get_aggregated(
+    organism: str,
+    request: Request,
+    fields: str | None = Query(None, description="Comma-separated list of fields to group by"),
+):
     """
-    Get aggregated sequence counts
+    Get aggregated sequence counts with optional grouping by metadata fields.
 
-    This is a simple implementation that returns total count.
-    Will be expanded to support grouping by fields.
+    Examples:
+    - GET /west-nile/sample/aggregated - Total count
+    - GET /west-nile/sample/aggregated?fields=geoLocCountry - Group by country
+    - GET /west-nile/sample/aggregated?geoLocCountry=USA - Filter by country
+    - GET /west-nile/sample/aggregated?fields=geoLocCountry&geoLocCountry=USA - Both
     """
     # Validate organism
     try:
@@ -88,25 +96,48 @@ async def get_aggregated(organism: str, request: Request):
     except ValueError as e:
         return JSONResponse(status_code=404, content={"error": str(e)})
 
+    # Parse fields parameter
+    group_by_fields = []
+    if fields:
+        group_by_fields = [f.strip() for f in fields.split(",")]
+
+    # Build query using QueryBuilder
+    builder = QueryBuilder(organism)
+    builder.set_group_by_fields(group_by_fields)
+
+    # Add filters from query parameters
+    # Extract all query params except special ones
+    query_params = dict(request.query_params)
+    builder.add_filters_from_params(query_params)
+
     # Get database session
     async for db in get_db():
-        # Query total count of released sequences
-        query = text("""
-            SELECT COUNT(*) as count
-            FROM sequence_entries_view
-            WHERE organism = :organism
-              AND released_at IS NOT NULL
-        """)
+        # Build and execute query
+        query_str, params = builder.build_aggregated_query()
+        result = await db.execute(text(query_str), params)
 
-        result = await db.execute(query, {"organism": organism})
-        count = result.scalar()
+        # Format results
+        rows = result.fetchall()
+        data = []
+
+        if group_by_fields:
+            # Return grouped results with field names
+            for row in rows:
+                row_dict = {"count": row.count}
+                for field in group_by_fields:
+                    # Use _mapping to access column by name (handles camelCase)
+                    row_dict[field] = row._mapping[field]
+                data.append(row_dict)
+        else:
+            # Simple total count
+            data = [{"count": rows[0].count if rows else 0}]
 
         # Generate request ID
         request_id = str(uuid.uuid4())
 
         # Return LAPIS-compatible response
         return {
-            "data": [{"count": count}],
+            "data": data,
             "info": {
                 "dataVersion": "0",  # TODO: Implement versioning
                 "requestId": request_id,

@@ -48,28 +48,92 @@ class QueryBuilder:
 
         # Base selection
         if self.group_by_fields:
-            # Build SELECT with grouped fields
-            # Use quoted identifiers to preserve camelCase column names
-            select_parts = []
-            for field in self.group_by_fields:
-                select_parts.append(
-                    f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
-                )
-            select_parts.append("COUNT(*) as count")
-            select_clause = ", ".join(select_parts)
+            # Check if versionStatus is one of the grouping fields
+            needs_version_status = "versionStatus" in self.group_by_fields
 
-            # Build GROUP BY
-            group_by_parts = []
-            for field in self.group_by_fields:
-                group_by_parts.append(f"joint_metadata -> 'metadata' ->> '{field}'")
-            group_by_clause = ", ".join(group_by_parts)
+            if needs_version_status:
+                # Need to use a CTE because window functions can't be in GROUP BY
+                # First compute versionStatus for each row, then aggregate
+                cte_select_parts = []
+                for field in self.group_by_fields:
+                    if field == "versionStatus":
+                        cte_select_parts.append(f"""
+                            CASE
+                                WHEN version = MAX(version) OVER (PARTITION BY accession) THEN 'LATEST_VERSION'
+                                WHEN EXISTS (
+                                    SELECT 1 FROM sequence_entries_view sev2
+                                    WHERE sev2.accession = sequence_entries_view.accession
+                                      AND sev2.version > sequence_entries_view.version
+                                      AND sev2.is_revocation = true
+                                      AND sev2.organism = :organism
+                                      AND sev2.released_at IS NOT NULL
+                                ) THEN 'REVOKED'
+                                ELSE 'REVISED'
+                            END AS "{field}"
+                        """)
+                    else:
+                        cte_select_parts.append(
+                            f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
+                        )
 
-            query = f"""
-                SELECT {select_clause}
-                FROM sequence_entries_view
-                WHERE organism = :organism
-                  AND released_at IS NOT NULL
-            """
+                cte_select = ", ".join(cte_select_parts)
+
+                # Now build outer query that groups by the computed fields
+                outer_select_parts = [f'"{field}"' for field in self.group_by_fields]
+                outer_select_parts.append("COUNT(*) as count")
+                select_clause = ", ".join(outer_select_parts)
+
+                group_by_parts = [f'"{field}"' for field in self.group_by_fields]
+                group_by_clause = ", ".join(group_by_parts)
+
+                # Build CTE query
+                query = f"""
+                    WITH computed_fields AS (
+                        SELECT {cte_select}
+                        FROM sequence_entries_view
+                        WHERE organism = :organism
+                          AND released_at IS NOT NULL
+                """
+                # Add filters in the CTE
+                if self.filters:
+                    for field, value in self.filters.items():
+                        param_name = f"filter_{field}"
+                        query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+
+                query += f"""
+                    )
+                    SELECT {select_clause}
+                    FROM computed_fields
+                """
+                # Set group_by_clause for later use
+                # We'll add GROUP BY after the query is built
+                query_needs_groupby = True
+                filters_already_applied = True
+            else:
+                # Build SELECT with grouped fields (no versionStatus)
+                # Use quoted identifiers to preserve camelCase column names
+                select_parts = []
+                for field in self.group_by_fields:
+                    select_parts.append(
+                        f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
+                    )
+                select_parts.append("COUNT(*) as count")
+                select_clause = ", ".join(select_parts)
+
+                # Build GROUP BY
+                group_by_parts = []
+                for field in self.group_by_fields:
+                    group_by_parts.append(f"joint_metadata -> 'metadata' ->> '{field}'")
+                group_by_clause = ", ".join(group_by_parts)
+
+                query = f"""
+                    SELECT {select_clause}
+                    FROM sequence_entries_view
+                    WHERE organism = :organism
+                      AND released_at IS NOT NULL
+                """
+                query_needs_groupby = True
+                filters_already_applied = False
         else:
             # Simple count
             query = """
@@ -79,16 +143,18 @@ class QueryBuilder:
                   AND released_at IS NOT NULL
             """
             group_by_clause = None
+            query_needs_groupby = False
+            filters_already_applied = False
 
-        # Add metadata filters
-        if self.filters:
+        # Add metadata filters (if not already applied in CTE)
+        if self.filters and not filters_already_applied:
             for field, value in self.filters.items():
                 param_name = f"filter_{field}"
                 query += f"\n  AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
                 params[param_name] = value
 
         # Add GROUP BY if needed
-        if self.group_by_fields:
+        if query_needs_groupby:
             query += f"\nGROUP BY {group_by_clause}"
             query += "\nORDER BY count DESC"
 

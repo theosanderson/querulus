@@ -148,6 +148,22 @@ This file tracks implementation progress for the Querulus project. It should be 
   - Added 4 comprehensive tests (all passing)
 
 #### Docker & Kubernetes Integration ✅ (2025-10-02)
+- ✅ **Kubernetes configuration fixed**:
+  - Removed organism loop from querulus-deployment.yaml and querulus-service.yaml
+  - Single stateless deployment `loculus-querulus` handles all organisms
+  - Created dedicated querulus-ingress.yaml (no prefix stripping needed)
+  - Disabled lapis-service.yaml and lapis-ingress.yaml when useQuerulus=true
+  - Updated database env vars to use `database` secret (same as backend)
+  - Scaled to 1 replica
+  - Added DB_URL support with JDBC to asyncpg conversion
+
+- ✅ **Health endpoint improvements**:
+  - Added debug logging for database connection failures
+  - health_check() returns (is_healthy, error_message) tuple
+  - Errors logged to help debug Kubernetes deployment issues
+  - Added test_health.py with tests for /health and /ready endpoints
+
+#### Docker & Kubernetes Integration (original) ✅ (2025-10-02)
 - ✅ **Dockerfile**:
   - Multi-stage build for optimized image size
   - Python 3.12 slim base image
@@ -223,13 +239,21 @@ This file tracks implementation progress for the Querulus project. It should be 
 
 ### Immediate (Next Session)
 
-**CRITICAL FIX FIRST:**
-- Remove the `range` loop from querulus-deployment.yaml and querulus-service.yaml
-- Querulus is a single stateless deployment that handles ALL organisms, not one per organism like LAPIS/SILO
-- Should be a single deployment named `loculus-querulus` (no organism suffix)
-- Update lapis-service.yaml to route to the single querulus service (not per-organism)
+**CRITICAL: Add static analysis to catch runtime errors**
+1. **Set up mypy for type checking**:
+   - Add mypy to dev dependencies
+   - Configure mypy.ini with strict settings
+   - Add pre-commit hook to run mypy
+   - Would have caught the missing `logger` import
 
-1. **Test Docker build locally**:
+2. **Add pre-commit hooks**:
+   - black (code formatting)
+   - isort (import sorting)
+   - flake8 (linting)
+   - mypy (type checking)
+   - Run on all commits to catch issues early
+
+3. **Test Docker build locally**:
    - Build Docker image locally
    - Test running container
    - Verify health checks work

@@ -10,12 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy dependency files
+# Copy package files
 COPY pyproject.toml /tmp/
+COPY querulus/ /tmp/querulus/
 WORKDIR /tmp
 
-# Install dependencies
-RUN pip install --no-cache-dir -e .
+# Install package with dependencies
+RUN pip install --no-cache-dir .
 
 # Final stage
 FROM python:3.12-slim

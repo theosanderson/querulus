@@ -946,9 +946,10 @@ class TestPostSequenceEndpoints:
         assert lapis_seq == querulus_seq, "Sequences should match exactly"
 
 
-def test_nucleotide_mutations_single_sample(config):
-    """Test nucleotide mutations for a single sample"""
-    accession = "LOC_000G9A7.1"
+def test_nucleotide_mutations_single_sample():
+    """Test nucleotide mutations for a single sample - ebola-sudan organism"""
+    config = TestConfig(organism="ebola-sudan")
+    accession = "LOC_000001Y.1"
 
     lapis_resp = requests.get(
         config.lapis_endpoint(f"sample/nucleotideMutations?accessionVersion={accession}")
@@ -971,23 +972,39 @@ def test_nucleotide_mutations_single_sample(config):
     assert len(lapis_mutations) == len(querulus_mutations), \
         f"Mutation count mismatch: LAPIS has {len(lapis_mutations)}, Querulus has {len(querulus_mutations)}"
 
-    # Convert to sets of mutation strings for comparison
-    lapis_mutation_set = {m["mutation"] for m in lapis_mutations}
-    querulus_mutation_set = {m["mutation"] for m in querulus_mutations}
+    # Verify we have a reasonable number of mutations
+    assert len(lapis_mutations) > 0, "LAPIS returned no mutations"
 
-    assert lapis_mutation_set == querulus_mutation_set, \
-        f"Mutations don't match. LAPIS only: {lapis_mutation_set - querulus_mutation_set}, Querulus only: {querulus_mutation_set - lapis_mutation_set}"
+    # Check a few specific mutations to verify detailed content
+    # From LAPIS response, we know this sample should have mutations like A96G, C146T, etc.
+    lapis_mutation_strings = {m["mutation"] for m in lapis_mutations}
+    querulus_mutation_strings = {m["mutation"] for m in querulus_mutations}
 
-    # Check first mutation has all required fields
-    if lapis_mutations:
-        mutation = querulus_mutations[0]
-        assert "mutation" in mutation
-        assert "mutationFrom" in mutation
-        assert "mutationTo" in mutation
-        assert "position" in mutation
-        assert "count" in mutation
-        assert "coverage" in mutation
-        assert "proportion" in mutation
+    # Verify mutation strings match
+    assert lapis_mutation_strings == querulus_mutation_strings, \
+        f"Mutation strings don't match.\nLAPIS: {sorted(lapis_mutation_strings)}\nQuerulus: {sorted(querulus_mutation_strings)}"
+
+    # Verify detailed fields for each mutation
+    for lapis_mut in lapis_mutations:
+        # Find matching mutation in querulus data
+        querulus_mut = next((m for m in querulus_mutations if m["mutation"] == lapis_mut["mutation"]), None)
+        assert querulus_mut is not None, f"Mutation {lapis_mut['mutation']} not found in Querulus response"
+
+        # Check all fields match
+        assert lapis_mut["mutationFrom"] == querulus_mut["mutationFrom"], \
+            f"mutationFrom mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["mutationTo"] == querulus_mut["mutationTo"], \
+            f"mutationTo mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["position"] == querulus_mut["position"], \
+            f"position mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["count"] == querulus_mut["count"], \
+            f"count mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["coverage"] == querulus_mut["coverage"], \
+            f"coverage mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["proportion"] == querulus_mut["proportion"], \
+            f"proportion mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["sequenceName"] == querulus_mut["sequenceName"], \
+            f"sequenceName mismatch for {lapis_mut['mutation']}"
 
 
 class TestDownloadAsFile:

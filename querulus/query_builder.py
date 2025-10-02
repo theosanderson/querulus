@@ -567,8 +567,9 @@ class QueryBuilder:
         where_clauses = []
         for field, value in self.filters.items():
             param_name = f"filter_{field}"
-            where_clauses.append(f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}")
-            params[param_name] = value
+            where_clauses.append(self._get_filter_clause(field, param_name, value, params))
+            if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
+                params[param_name] = value
 
         where_clause = ""
         if where_clauses:
@@ -615,8 +616,9 @@ class QueryBuilder:
         where_clauses = []
         for field, value in self.filters.items():
             param_name = f"filter_{field}"
-            where_clauses.append(f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}")
-            params[param_name] = value
+            where_clauses.append(self._get_filter_clause(field, param_name, value, params))
+            if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
+                params[param_name] = value
 
         where_clause = ""
         if where_clauses:

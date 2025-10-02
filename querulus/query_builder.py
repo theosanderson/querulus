@@ -395,12 +395,14 @@ class QueryBuilder:
         join_fields.update(filter_base_fields)
         join_fields.update(self._order_dependency_fields())
 
+        joins = self._collect_join_requirements(join_fields)
+
         query = (
             "SELECT\n"
             f"        {select_clause}\n"
             f"FROM {BASE_TABLE}"
         )
-        query += self._build_join_sql(join_fields, indent="    ")
+        query += self._build_join_sql(joins, indent="    ")
         query += (
             "\nWHERE organism = :organism"
             "\n  AND released_at IS NOT NULL"
@@ -447,6 +449,7 @@ class QueryBuilder:
 
         cte_where: list[str] = []
         outer_where: list[str] = []
+        cte_filter_fields: list[str] = []
         for field, value in self.filters.items():
             base_field, _ = self._resolve_filter_base(field)
             if self._field_definition(base_field).requires_cte:
@@ -458,6 +461,7 @@ class QueryBuilder:
                     use_alias=True,
                 )
             else:
+                cte_filter_fields.append(base_field)
                 self._append_filter_clause(
                     cte_where,
                     field=field,
@@ -465,6 +469,9 @@ class QueryBuilder:
                     params=params,
                     use_alias=False,
                 )
+
+        # Collect joins from CTE filter fields as well
+        joins.update(self._collect_join_requirements(cte_filter_fields))
 
         query = (
             "WITH computed_fields AS (\n"
@@ -757,16 +764,25 @@ class QueryBuilder:
 
         if not computed_filters:
             where_clauses: list[str] = []
+            filter_fields: list[str] = []
             for field, value in simple_filters:
+                base_field, _ = self._resolve_filter_base(field)
+                filter_fields.append(base_field)
                 self._append_filter_clause(where_clauses, field=field, value=value, params=params, use_alias=False)
+
+            # Collect join requirements from filtered fields
+            joins = self._collect_join_requirements(filter_fields)
 
             query = (
                 "SELECT\n"
                 "        accession,\n"
                 "        version,\n"
                 f"        {json_path} AS compressed_seq\n"
-                f"FROM {BASE_TABLE}\n"
-                "WHERE organism = :organism\n"
+                f"FROM {BASE_TABLE}"
+            )
+            query += self._build_join_sql(joins, indent="    ")
+            query += (
+                "\nWHERE organism = :organism\n"
                 "  AND released_at IS NOT NULL\n"
                 f"  AND {json_path} IS NOT NULL"
             )
@@ -788,8 +804,11 @@ class QueryBuilder:
             [self._resolve_filter_base(field)[0] for field, _ in computed_filters]
         )
         select_field_names = self._ordered_unique(["accession", "version"] + computed_field_names)
-        join_fields = set(select_field_names)
-        join_fields.update(self._resolve_filter_base(field)[0] for field, _ in simple_filters)
+        cte_filter_fields = [self._resolve_filter_base(field)[0] for field, _ in simple_filters]
+
+        # Collect all fields that require joins
+        all_fields = list(select_field_names) + cte_filter_fields
+        joins = self._collect_join_requirements(all_fields)
 
         select_parts = [self._field_definition(name).select_sql(self) for name in select_field_names]
         select_parts.append(f"{json_path} AS compressed_seq")
@@ -805,7 +824,7 @@ class QueryBuilder:
             f"        {select_clause}\n"
             f"    FROM {BASE_TABLE}"
         )
-        query += self._build_join_sql(join_fields, indent="        ")
+        query += self._build_join_sql(joins, indent="        ")
         query += (
             "\n    WHERE organism = :organism"
             "\n      AND released_at IS NOT NULL"

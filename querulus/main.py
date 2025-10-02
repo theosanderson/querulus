@@ -542,6 +542,8 @@ async def get_unaligned_nucleotide_sequences(
     limit: int | None = Query(None, description="Maximum number of sequences"),
     offset: int = Query(0, description="Number of sequences to skip"),
     dataFormat: str = Query("FASTA", description="Output format: FASTA or JSON"),
+    downloadAsFile: bool = Query(False, description="Trigger file download"),
+    downloadFileBasename: str | None = Query(None, description="Basename for downloaded file"),
 ):
     """
     Get unaligned nucleotide sequences in FASTA or JSON format.
@@ -604,7 +606,7 @@ async def get_unaligned_nucleotide_sequences(
                 }
                 for seq in sequences
             ]
-            return JSONResponse(content=json_data)
+            response = JSONResponse(content=json_data)
         else:
             # Return FASTA format
             fasta_lines = []
@@ -612,7 +614,19 @@ async def get_unaligned_nucleotide_sequences(
                 fasta_lines.append(f">{seq['accessionVersion']}")
                 fasta_lines.append(seq["sequence"])
             fasta_content = "\n".join(fasta_lines)
-            return Response(content=fasta_content, media_type="text/x-fasta")
+            response = Response(content=fasta_content, media_type="text/x-fasta")
+
+        # Add Content-Disposition header if downloadAsFile is true
+        if downloadAsFile:
+            filename = downloadFileBasename if downloadFileBasename else f"{organism}_sequences"
+            # Add appropriate extension based on format
+            if dataFormat.upper() == "JSON":
+                filename += ".json"
+            else:
+                filename += ".fasta"
+            response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+
+        return response
 
 
 @app.post("/{organism}/sample/unalignedNucleotideSequences")

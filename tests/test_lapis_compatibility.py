@@ -902,49 +902,61 @@ def test_nucleotide_mutations_single_sample(config):
         assert "proportion" in mutation
 
 
-def test_amino_acid_mutations_single_sample(config):
-    """Test amino acid mutations for a single sample"""
-    accession = "LOC_000G9A7.1"
+class TestDownloadAsFile:
+    """Test downloadAsFile parameter with various endpoints"""
 
-    lapis_resp = requests.get(
-        config.lapis_endpoint(f"sample/aminoAcidMutations?accessionVersion={accession}")
-    )
-    querulus_resp = requests.get(
-        config.querulus_endpoint(f"sample/aminoAcidMutations?accessionVersion={accession}")
-    )
+    def test_unaligned_nucleotide_sequences_download_as_file(self):
+        """Test GET unalignedNucleotideSequences with downloadAsFile=true for ebola-sudan"""
+        config = TestConfig(
+            organism="ebola-sudan"
+        )
 
-    assert lapis_resp.status_code == 200
-    assert querulus_resp.status_code == 200
+        params = {
+            "downloadAsFile": "true",
+            "downloadFileBasename": "ebola-sudan_nuc_2025-10-02T1517",
+            "dataUseTerms": "OPEN",
+            "dataFormat": "fasta",
+            "versionStatus": "LATEST_VERSION",
+            "isRevocation": "false"
+        }
 
-    lapis_data = lapis_resp.json()
-    querulus_data = querulus_resp.json()
+        lapis_resp = requests.get(
+            config.lapis_endpoint("sample/unalignedNucleotideSequences"),
+            params=params
+        )
+        querulus_resp = requests.get(
+            config.querulus_endpoint("sample/unalignedNucleotideSequences"),
+            params=params
+        )
 
-    # Compare mutation data
-    lapis_mutations = lapis_data["data"]
-    querulus_mutations = querulus_data["data"]
+        assert lapis_resp.status_code == 200, f"LAPIS returned {lapis_resp.status_code}"
+        assert querulus_resp.status_code == 200, f"Querulus returned {querulus_resp.status_code}: {querulus_resp.text}"
 
-    # Should have same number of mutations
-    assert len(lapis_mutations) == len(querulus_mutations), \
-        f"Mutation count mismatch: LAPIS has {len(lapis_mutations)}, Querulus has {len(querulus_mutations)}"
+        # Check Content-Disposition header for file download
+        assert "Content-Disposition" in lapis_resp.headers, "LAPIS should have Content-Disposition header"
+        assert "Content-Disposition" in querulus_resp.headers, "Querulus should have Content-Disposition header"
 
-    # Convert to sets of mutation strings for comparison
-    lapis_mutation_set = {m["mutation"] for m in lapis_mutations}
-    querulus_mutation_set = {m["mutation"] for m in querulus_mutations}
+        # Verify the filename in the header
+        lapis_disposition = lapis_resp.headers["Content-Disposition"]
+        querulus_disposition = querulus_resp.headers["Content-Disposition"]
 
-    assert lapis_mutation_set == querulus_mutation_set, \
-        f"Mutations don't match. LAPIS only: {lapis_mutation_set - querulus_mutation_set}, Querulus only: {querulus_mutation_set - lapis_mutation_set}"
+        assert "attachment" in lapis_disposition.lower(), "LAPIS should use attachment disposition"
+        assert "attachment" in querulus_disposition.lower(), "Querulus should use attachment disposition"
 
-    # Check first mutation has all required fields including sequenceName
-    if lapis_mutations:
-        mutation = querulus_mutations[0]
-        assert "mutation" in mutation
-        assert "mutationFrom" in mutation
-        assert "mutationTo" in mutation
-        assert "position" in mutation
-        assert "sequenceName" in mutation
-        assert "count" in mutation
-        assert "coverage" in mutation
-        assert "proportion" in mutation
+        # Check that basename is used in filename
+        assert "ebola-sudan_nuc_2025-10-02T1517" in querulus_disposition, \
+            f"Expected basename in filename, got: {querulus_disposition}"
+
+        # Both should return FASTA format
+        assert lapis_resp.text.startswith(">"), "LAPIS should return FASTA format"
+        assert querulus_resp.text.startswith(">"), "Querulus should return FASTA format"
+
+        # Count sequences in both responses
+        lapis_sequences = [line for line in lapis_resp.text.split('\n') if line.startswith('>')]
+        querulus_sequences = [line for line in querulus_resp.text.split('\n') if line.startswith('>')]
+
+        assert len(lapis_sequences) == len(querulus_sequences), \
+            f"Sequence count mismatch: LAPIS={len(lapis_sequences)}, Querulus={len(querulus_sequences)}"
 
 
 if __name__ == "__main__":

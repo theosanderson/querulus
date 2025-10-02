@@ -54,9 +54,30 @@ class Settings(BaseSettings):
     database_max_overflow: int = 10
     config_path: str = "config/querulus_config.json"
 
+    # Support both individual env vars (local dev) and DB_URL (k8s)
+    db_url: str | None = None
+    db_username: str | None = None
+    db_password: str | None = None
+
     class Config:
         env_prefix = "QUERULUS_"
         case_sensitive = False
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        # If DB_URL is provided (Kubernetes), convert from JDBC to asyncpg format
+        if self.db_url:
+            # Convert jdbc:postgresql://... to postgresql+asyncpg://...
+            url = self.db_url.replace("jdbc:postgresql://", "postgresql+asyncpg://")
+            # If username and password are separate, inject them
+            if self.db_username and self.db_password:
+                # Parse URL to inject credentials
+                if "://" in url:
+                    protocol, rest = url.split("://", 1)
+                    if "@" not in rest:  # No credentials in URL
+                        host_and_db = rest
+                        url = f"{protocol}://{self.db_username}:{self.db_password}@{host_and_db}"
+            self.database_url = url
 
 
 class Config:

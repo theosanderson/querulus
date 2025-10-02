@@ -764,8 +764,9 @@ class QueryBuilder:
                 for field, value in self.filters.items():
                     if field not in computed_fields:
                         param_name = f"filter_{field}"
-                        query += f"\n          AND {self._get_filter_clause(field, param_name)}"
-                        params[param_name] = value
+                        query += f"\n          AND {self._get_filter_clause(field, param_name, value, params)}"
+                        if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
+                            params[param_name] = value
 
             # Close the CTE and select from it
             query += f"""
@@ -781,8 +782,18 @@ class QueryBuilder:
                     if field in computed_fields:
                         # Computed field - filter in outer query
                         param_name = f"filter_{field}"
-                        query += f'\n  AND "{field}" = :{param_name}'
-                        params[param_name] = value
+                        if isinstance(value, list):
+                            # Create individual parameters for each list item
+                            param_placeholders = []
+                            for i, item in enumerate(value):
+                                item_param_name = f"{param_name}_{i}"
+                                param_placeholders.append(f":{item_param_name}")
+                                params[item_param_name] = item
+                            param_str = f"({', '.join(param_placeholders)})"
+                            query += f'\n  AND "{field}" IN {param_str}'
+                        else:
+                            query += f'\n  AND "{field}" = :{param_name}'
+                            params[param_name] = value
 
             # Add pagination
             query += f"\nORDER BY {self.build_order_by_clause('details')}"

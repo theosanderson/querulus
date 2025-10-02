@@ -1,23 +1,90 @@
-"""Query builder for translating LAPIS parameters to SQL"""
+"""Query builder for translating LAPIS parameters to SQL."""
 
-from typing import Any
-from sqlalchemy import text
-from sqlalchemy.sql import Select
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Sequence
+
+
+BASE_TABLE = "sequence_entries_view"
+JOIN_GROUPS = "groups"
+JOIN_DATA_USE_TERMS = "data_use_terms"
+
+JOIN_SQL: dict[str, str] = {
+    JOIN_GROUPS: "LEFT JOIN groups_table ON sequence_entries_view.group_id = groups_table.group_id",
+    JOIN_DATA_USE_TERMS: "LEFT JOIN data_use_terms_table ON sequence_entries_view.accession = data_use_terms_table.accession",
+}
+
+_PARAM_SANITIZER = re.compile(r"[^a-zA-Z0-9_]")
+
+
+ExpressionFactory = Callable[["QueryBuilder"], str]
+OrderFactory = Callable[["QueryBuilder"], Sequence[str]]
+
+
+@dataclass(frozen=True)
+class FieldDefinition:
+    """Configuration describing how to project and filter a logical field."""
+
+    name: str
+    expression_factory: ExpressionFactory
+    requires_cte: bool = False
+    joins: tuple[str, ...] = ()
+    order_base: Sequence[str] | OrderFactory | None = None
+    order_alias: Sequence[str] | OrderFactory | None = None
+    filter_factory: ExpressionFactory | None = None
+    group_factory: ExpressionFactory | None = None
+    order_dependencies: tuple[str, ...] = ()
+
+    def expression(self, builder: "QueryBuilder") -> str:
+        return self.expression_factory(builder)
+
+    def select_sql(self, builder: "QueryBuilder") -> str:
+        return f"{self.expression(builder)} AS \"{self.name}\""
+
+    def filter_sql(self, builder: "QueryBuilder") -> str:
+        factory = self.filter_factory or self.expression_factory
+        return factory(builder)
+
+    def group_sql(self, builder: "QueryBuilder") -> str:
+        factory = self.group_factory or self.expression_factory
+        return factory(builder)
+
+    def order_sql(self, builder: "QueryBuilder", *, use_alias: bool) -> Sequence[str]:
+        raw: Sequence[str] | OrderFactory | None
+        raw = self.order_alias if use_alias else self.order_base
+
+        if raw is None:
+            return (f"\"{self.name}\"" if use_alias else self.expression(builder),)
+
+        if callable(raw):
+            raw = raw(builder)
+
+        return tuple(raw)
+
+
+_METADATA_FIELD_CACHE: dict[str, FieldDefinition] = {}
+
+
+def _metadata_field_definition(field: str) -> FieldDefinition:
+    """Create and cache a definition for a metadata JSON field."""
+    cached = _METADATA_FIELD_CACHE.get(field)
+    if cached:
+        return cached
+
+    json_key = field.replace("'", "''")
+
+    def metadata_expr(_: "QueryBuilder", key: str = json_key) -> str:
+        return f"joint_metadata -> 'metadata' ->> '{key}'"
+
+    definition = FieldDefinition(name=field, expression_factory=metadata_expr)
+    _METADATA_FIELD_CACHE[field] = definition
+    return definition
 
 
 class QueryBuilder:
-    """Builds SQL queries from LAPIS-style parameters"""
-
-    # Fields that map to table columns (not JSONB metadata)
-    TABLE_COLUMN_FIELDS = {
-        "is_revocation",  # boolean column
-        "accession",      # text column
-        "version",        # bigint column
-        "submitter",      # text column
-        "group_id",       # integer column
-        "submission_id",  # text column
-        "version_comment",# text column
-    }
+    """Builds SQL queries from LAPIS-style parameters."""
 
     def __init__(self, organism: str, organism_config: Any = None):
         self.organism = organism
@@ -26,71 +93,14 @@ class QueryBuilder:
         self.group_by_fields: list[str] = []
         self.order_by_fields: list[str] = []
 
-    def _get_filter_clause(self, field: str, param_name: str, value: Any = None, params_dict: dict = None) -> str:
-        """
-        Get SQL filter clause for a field.
-
-        Returns appropriate SQL based on whether field is a table column or JSONB field.
-        Handles both scalar values (=) and list values (IN).
-        Handles timestamp range filters (From/To suffixes).
-
-        For list values, creates individual parameters and adds them to params_dict.
-        """
-        # Handle timestamp range filters
-        if field.endswith("From") or field.endswith("To"):
-            base_field = field[:-4]  # Remove From/To suffix
-            operator = ">=" if field.endswith("From") else "<="
-
-            # Map to SQL expression
-            if base_field == "releasedAtTimestamp":
-                return f"EXTRACT(EPOCH FROM released_at)::bigint {operator} :{param_name}"
-            elif base_field == "submittedAtTimestamp":
-                return f"EXTRACT(EPOCH FROM submitted_at)::bigint {operator} :{param_name}"
-
-        # Determine if we're using IN or = based on value type
-        is_list = isinstance(value, list) if value is not None else False
-
-        if is_list:
-            # Create individual parameters for each list item
-            param_placeholders = []
-            for i, item in enumerate(value):
-                item_param_name = f"{param_name}_{i}"
-                param_placeholders.append(f":{item_param_name}")
-                if params_dict is not None:
-                    params_dict[item_param_name] = item
-            param_str = f"({', '.join(param_placeholders)})"
-            operator = "IN"
-        else:
-            operator = "="
-            param_str = f":{param_name}"
-
-        # Special handling for camelCase fields that map to snake_case database columns
-        camel_to_snake = {
-            "isRevocation": "is_revocation",
-            "submissionId": "submission_id",
-            "groupId": "group_id",
-            "versionComment": "version_comment",
-        }
-
-        if field in camel_to_snake:
-            return f"{camel_to_snake[field]} {operator} {param_str}"
-        elif field in self.TABLE_COLUMN_FIELDS:
-            return f"{field} {operator} {param_str}"
-        else:
-            return f"joint_metadata -> 'metadata' ->> '{field}' {operator} {param_str}"
-
+    # ------------------------------------------------------------------
+    # Public API for configuring the builder
+    # ------------------------------------------------------------------
     def add_filter(self, field: str, value: Any) -> "QueryBuilder":
-        """Add a metadata filter"""
         self.filters[field] = value
         return self
 
     def add_filters_from_params(self, params: dict[str, Any]) -> "QueryBuilder":
-        """
-        Add filters from query parameters.
-
-        Filters are any parameters that aren't special LAPIS parameters like
-        'fields', 'orderBy', 'limit', 'offset', etc.
-        """
         special_params = {
             "fields", "orderBy", "limit", "offset", "format",
             "downloadAsFile", "downloadFileBasename", "dataFormat",
@@ -98,565 +108,781 @@ class QueryBuilder:
         }
         for key, value in params.items():
             if key not in special_params and value is not None:
-                # Convert boolean string values to actual booleans for isRevocation
                 if key == "isRevocation" and isinstance(value, str):
                     value = value.lower() == "true"
                 self.filters[key] = value
         return self
 
     def set_group_by_fields(self, fields: list[str]) -> "QueryBuilder":
-        """Set fields to group by"""
         self.group_by_fields = fields
         return self
 
     def set_order_by_fields(self, fields: list[str]) -> "QueryBuilder":
-        """Set fields to order by"""
         self.order_by_fields = fields
         return self
 
+    # ------------------------------------------------------------------
+    # Core helpers
+    # ------------------------------------------------------------------
+    def _field_definition(self, field: str) -> FieldDefinition:
+        definition = FIELD_DEFINITIONS.get(field)
+        if definition:
+            return definition
+        return _metadata_field_definition(field)
+
+    def _resolve_filter_base(self, field: str) -> tuple[str, str | None]:
+        if field.endswith("From"):
+            return field[:-4], ">="
+        if field.endswith("To"):
+            return field[:-2], "<="
+        return field, None
+
+    def _filter_base_fields(self) -> list[str]:
+        base_fields = []
+        for field in self.filters:
+            base_field, _ = self._resolve_filter_base(field)
+            base_fields.append(base_field)
+        return base_fields
+
+    def _order_dependency_fields(self) -> list[str]:
+        dependencies: list[str] = []
+        for field in self.order_by_fields:
+            if field in {"random", "count"}:
+                continue
+            definition = self._field_definition(field)
+            dependencies.append(field)
+            dependencies.extend(list(definition.order_dependencies))
+        return dependencies
+
+    def _requires_cte(self, fields: Iterable[str]) -> bool:
+        return any(self._field_definition(field).requires_cte for field in fields)
+
+    def _collect_join_requirements(self, fields: Iterable[str]) -> set[str]:
+        joins: set[str] = set()
+        for field in fields:
+            joins.update(self._field_definition(field).joins)
+        return joins
+
+    def _build_join_sql(self, joins: Iterable[str], *, indent: str) -> str:
+        clauses = []
+        join_order = [JOIN_GROUPS, JOIN_DATA_USE_TERMS]
+        join_set = {j for j in joins if j in JOIN_SQL}
+        for name in join_order:
+            if name in join_set:
+                clauses.append(f"{indent}{JOIN_SQL[name]}")
+        if not clauses:
+            return ""
+        return "\n" + "\n".join(clauses)
+
+    @staticmethod
+    def _ordered_unique(items: Iterable[str]) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for item in items:
+            if item not in seen:
+                seen.add(item)
+                ordered.append(item)
+        return ordered
+
+    def _append_filter_clause(
+        self,
+        clauses: list[str],
+        *,
+        field: str,
+        value: Any,
+        params: dict[str, Any],
+        use_alias: bool,
+    ) -> None:
+        base_field, operator = self._resolve_filter_base(field)
+        definition = self._field_definition(base_field)
+        expression = f'"{base_field}"' if use_alias else definition.filter_sql(self)
+
+        param_prefix = f"filter_{_PARAM_SANITIZER.sub('_', field)}"
+        clause = self._render_filter_condition(
+            expression,
+            value,
+            operator,
+            params,
+            param_prefix,
+        )
+        clauses.append(clause)
+
+    def _render_filter_condition(
+        self,
+        expression: str,
+        value: Any,
+        operator: str | None,
+        params: dict[str, Any],
+        param_prefix: str,
+    ) -> str:
+        if isinstance(value, list):
+            placeholders = []
+            for idx, item in enumerate(value):
+                param_name = f"{param_prefix}_{idx}"
+                params[param_name] = item
+                placeholders.append(f":{param_name}")
+            return f"{expression} IN ({', '.join(placeholders)})"
+
+        param_name = param_prefix
+        params[param_name] = value
+        op = operator or "="
+        return f"{expression} {op} :{param_name}"
+
+    # ------------------------------------------------------------------
+    # Ordering
+    # ------------------------------------------------------------------
     def build_order_by_clause(self, context: str = "details") -> str:
-        """
-        Build ORDER BY clause based on order_by_fields.
-
-        Args:
-            context: Either "details" (for details/sequences) or "aggregated"
-
-        Returns:
-            SQL ORDER BY clause (without "ORDER BY" keyword)
-        """
         if not self.order_by_fields:
-            # Default ordering
-            if context == "aggregated":
-                return "count DESC"
-            else:
-                return "accession"
+            return "count DESC" if context == "aggregated" else '"accession"'
 
-        # Computed fields that have SQL expressions
-        computed_fields_map = {
-            "accession": "accession",
-            "version": "version",
-            "accessionVersion": "accession, version",
-            "displayName": "accession, version",
-            "submittedDate": "submitted_at",
-            "submittedAtTimestamp": "EXTRACT(EPOCH FROM submitted_at)",
-            "releasedDate": "released_at",
-            "releasedAtTimestamp": "EXTRACT(EPOCH FROM released_at)",
-            "submissionId": "submission_id",
-            "submitter": "submitter",
-            "groupId": "group_id",
-            "groupName": "groups_table.name",
-            "isRevocation": "is_revocation",
-            "versionComment": "version_comment",
-            "versionStatus": "versionStatus",
-            "earliestReleaseDate": "earliestReleaseDate",
-            "dataUseTerms": "dataUseTerms",
-            "dataUseTermsRestrictedUntil": "dataUseTermsRestrictedUntil",
-            "dataUseTermsUrl": "dataUseTermsUrl",
-        }
-
-        order_parts = []
+        order_fragments: list[str] = []
         for field in self.order_by_fields:
             if field == "random":
-                order_parts.append("RANDOM()")
-            elif field == "count" and context == "aggregated":
-                order_parts.append("count")
-            elif field in computed_fields_map:
-                order_parts.append(computed_fields_map[field])
-            else:
-                # Metadata field - use quoted name if in SELECT, otherwise JSONB path
-                order_parts.append(f'"{field}"')
+                order_fragments.append("RANDOM()")
+                continue
+            if field == "count" and context == "aggregated":
+                order_fragments.append("count")
+                continue
 
-        return ", ".join(order_parts) if order_parts else ("count DESC" if context == "aggregated" else "accession")
+            definition = self._field_definition(field)
+            fragments = definition.order_sql(self, use_alias=True)
+            order_fragments.extend(fragments)
 
-    def build_earliest_release_date_expression(self) -> str:
-        """
-        Build SQL expression for earliestReleaseDate.
+        return ", ".join(order_fragments)
 
-        Returns the LEAST of:
-        - released_at
-        - any configured external date fields
-        - minimum earliestReleaseDate from previous versions
-        """
-        if not self.organism_config:
-            # Fallback to just released_at if no config
-            return "released_at"
-
-        earliest_config = self.organism_config.schema.get('earliestReleaseDate', {})
-        if not earliest_config.get('enabled', False):
-            return "released_at"
-
-        external_fields = earliest_config.get('externalFields', [])
-
-        # Build LEAST expression with released_at and external fields
-        parts = ["released_at"]
-        for field in external_fields:
-            # Convert string date to timestamp, handle NULL
-            parts.append(
-                f"(joint_metadata -> 'metadata' ->> '{field}')::timestamp"
-            )
-
-        # Also need to consider earliestReleaseDate from earlier versions
-        # Use window function to get the minimum across all versions of this accession
-        least_expr = "LEAST(" + ", ".join(parts) + ")"
-
-        # Apply window function to get minimum across versions
-        # This ensures later versions inherit earlier earliestReleaseDate
-        return f"LEAST({least_expr}, MIN({least_expr}) OVER (PARTITION BY sequence_entries_view.accession ORDER BY version ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))"
-
-    def build_data_use_terms_expression(self) -> str:
-        """
-        Build SQL expression for dataUseTerms field.
-        Returns 'OPEN' if not restricted or if restriction has expired, else 'RESTRICTED'.
-        """
-        if not self.organism_config:
-            return "'OPEN'"
-
-        # Check if dataUseTerms are enabled in config
-        data_use_terms_config = self.organism_config.backend_config.get('dataUseTerms', {})
-        if not data_use_terms_config.get('enabled', False):
-            return "'OPEN'"
-
-        return """
-            CASE
-                WHEN data_use_terms_table.data_use_terms_type = 'RESTRICTED'
-                     AND data_use_terms_table.restricted_until > NOW()
-                THEN 'RESTRICTED'
-                ELSE 'OPEN'
-            END
-        """
-
-    def build_data_use_terms_restricted_until_expression(self) -> str:
-        """
-        Build SQL expression for dataUseTermsRestrictedUntil field.
-        Returns the restriction date if currently restricted, else NULL.
-        """
-        if not self.organism_config:
-            return "NULL"
-
-        data_use_terms_config = self.organism_config.backend_config.get('dataUseTerms', {})
-        if not data_use_terms_config.get('enabled', False):
-            return "NULL"
-
-        return """
-            CASE
-                WHEN data_use_terms_table.data_use_terms_type = 'RESTRICTED'
-                     AND data_use_terms_table.restricted_until > NOW()
-                THEN TO_CHAR(data_use_terms_table.restricted_until, 'YYYY-MM-DD')
-                ELSE NULL
-            END
-        """
-
-    def build_data_use_terms_url_expression(self) -> str:
-        """
-        Build SQL expression for dataUseTermsUrl field.
-        Returns the appropriate URL based on data use terms status.
-        """
-        if not self.organism_config:
-            return "NULL"
-
-        data_use_terms_config = self.organism_config.backend_config.get('dataUseTerms', {})
-        if not data_use_terms_config.get('enabled', False):
-            return "NULL"
-
-        urls = data_use_terms_config.get('urls', {})
-        open_url = urls.get('open', '')
-        restricted_url = urls.get('restricted', '')
-
-        return f"""
-            CASE
-                WHEN data_use_terms_table.data_use_terms_type = 'RESTRICTED'
-                     AND data_use_terms_table.restricted_until > NOW()
-                THEN '{restricted_url}'
-                ELSE '{open_url}'
-            END
-        """
-
+    # ------------------------------------------------------------------
+    # Aggregated queries
+    # ------------------------------------------------------------------
     def build_aggregated_query(
         self, limit: int | None = None, offset: int = 0
     ) -> tuple[str, dict[str, Any]]:
-        """
-        Build aggregated count query with optional grouping.
+        params: dict[str, Any] = {"organism": self.organism}
 
-        Returns: (query_string, bind_params)
-        """
-        params = {"organism": self.organism}
+        filter_base_fields = self._filter_base_fields()
+        order_dependency_fields = self._order_dependency_fields()
 
-        # Computed fields that need special handling
-        computed_fields = {
-            "accessionVersion",
-            "displayName",
-            "versionStatus",
-            "submittedDate",
-            "submittedAtTimestamp",
-            "releasedDate",
-            "releasedAtTimestamp",
-            "earliestReleaseDate",
-            "submissionId",
-            "submitter",
-            "groupId",
-            "groupName",
-            "isRevocation",
-            "versionComment",
-            "dataUseTerms",
-            "dataUseTermsRestrictedUntil",
-            "dataUseTermsUrl",
-        }
+        cte_candidate_fields = set(self.group_by_fields)
+        cte_candidate_fields.update(filter_base_fields)
+        cte_candidate_fields.update(order_dependency_fields)
 
-        # Base selection
         if self.group_by_fields:
-            # Check if versionStatus or earliestReleaseDate is one of the grouping fields OR filters
-            # Both require window functions, so we need CTE approach
-            needs_version_status = "versionStatus" in self.group_by_fields or "versionStatus" in self.filters
-            needs_earliest_release = "earliestReleaseDate" in self.group_by_fields or "earliestReleaseDate" in self.filters
-            needs_cte = needs_version_status or needs_earliest_release
-
-            if needs_cte:
-                # Need to use a CTE because window functions can't be in GROUP BY
-                # First compute versionStatus for each row, then aggregate
-                # Include both group_by_fields and any filtered fields (computed or table columns)
-                # We need to include table column fields like groupId, submissionId in the CTE SELECT
-                # so they can be referenced in the outer WHERE clause
-                table_column_camelcase_fields = {"groupId", "submissionId", "submitter", "isRevocation", "versionComment"}
-                all_fields = set(self.group_by_fields)
-                # Add any filtered fields that are computed or table columns (but not metadata fields)
-                all_fields.update(f for f in self.filters.keys() if f in computed_fields or f in table_column_camelcase_fields)
-
-                cte_select_parts = []
-                for field in all_fields:
-                    if field == "versionStatus":
-                        cte_select_parts.append(f"""
-                            CASE
-                                WHEN version = MAX(version) OVER (PARTITION BY accession) THEN 'LATEST_VERSION'
-                                WHEN EXISTS (
-                                    SELECT 1 FROM sequence_entries_view sev2
-                                    WHERE sev2.accession = sequence_entries_view.accession
-                                      AND sev2.version > sequence_entries_view.version
-                                      AND sev2.is_revocation = true
-                                      AND sev2.organism = :organism
-                                      AND sev2.released_at IS NOT NULL
-                                ) THEN 'REVOKED'
-                                ELSE 'REVISED'
-                            END AS "{field}"
-                        """)
-                    elif field == "earliestReleaseDate":
-                        earliest_expr = self.build_earliest_release_date_expression()
-                        cte_select_parts.append(
-                            f"TO_CHAR({earliest_expr}, 'YYYY-MM-DD') AS \"{field}\""
-                        )
-                    elif field == "groupId":
-                        cte_select_parts.append(f'group_id AS "{field}"')
-                    elif field == "submissionId":
-                        cte_select_parts.append(f'submission_id AS "{field}"')
-                    elif field == "submitter":
-                        cte_select_parts.append(f'submitter AS "{field}"')
-                    elif field == "isRevocation":
-                        cte_select_parts.append(f'is_revocation AS "{field}"')
-                    elif field == "versionComment":
-                        cte_select_parts.append(f'version_comment AS "{field}"')
-                    else:
-                        # Metadata field from JSONB
-                        cte_select_parts.append(
-                            f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
-                        )
-
-                cte_select = ", ".join(cte_select_parts)
-
-                # Now build outer query that groups by the computed fields
-                outer_select_parts = [f'"{field}"' for field in self.group_by_fields]
-                outer_select_parts.append("COUNT(*) as count")
-                select_clause = ", ".join(outer_select_parts)
-
-                group_by_parts = [f'"{field}"' for field in self.group_by_fields]
-                group_by_clause = ", ".join(group_by_parts)
-
-                # Build CTE query
-                query = f"""
-                    WITH computed_fields AS (
-                        SELECT {cte_select}
-                        FROM sequence_entries_view
-                        WHERE organism = :organism
-                          AND released_at IS NOT NULL
-                """
-                # Add non-computed field filters in the CTE
-                if self.filters:
-                    for field, value in self.filters.items():
-                        if field not in computed_fields:
-                            param_name = f"filter_{field}"
-                            query += f"\n          AND {self._get_filter_clause(field, param_name, value, params)}"
-                            if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
-                                params[param_name] = value
-
-                query += f"""
-                    )
-                    SELECT {select_clause}
-                    FROM computed_fields
-                    WHERE 1=1
-                """
-
-                # Add computed field and table column filters in outer WHERE clause
-                # (these were selected in the CTE, so we filter on them here)
-                if self.filters:
-                    for field, value in self.filters.items():
-                        if field in computed_fields or field in table_column_camelcase_fields:
-                            param_name = f"filter_{field}"
-                            query += f'\n  AND "{field}" = :{param_name}'
-                            params[param_name] = value
-
-                # Set group_by_clause for later use
-                # We'll add GROUP BY after the query is built
-                query_needs_groupby = True
-                filters_already_applied = True
+            if self._requires_cte(cte_candidate_fields):
+                query = self._build_aggregated_query_with_cte(
+                    params,
+                    filter_base_fields,
+                    limit,
+                    offset,
+                )
             else:
-                # Build SELECT with grouped fields (no versionStatus)
-                # Use quoted identifiers to preserve camelCase column names
-                select_parts = []
-                for field in self.group_by_fields:
-                    select_parts.append(
-                        f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
-                    )
-                select_parts.append("COUNT(*) as count")
-                select_clause = ", ".join(select_parts)
-
-                # Build GROUP BY
-                group_by_parts = []
-                for field in self.group_by_fields:
-                    group_by_parts.append(f"joint_metadata -> 'metadata' ->> '{field}'")
-                group_by_clause = ", ".join(group_by_parts)
-
-                query = f"""
-                    SELECT {select_clause}
-                    FROM sequence_entries_view
-                    WHERE organism = :organism
-                      AND released_at IS NOT NULL
-                """
-                query_needs_groupby = True
-                filters_already_applied = False
+                query = self._build_aggregated_query_simple(
+                    params,
+                    filter_base_fields,
+                    limit,
+                    offset,
+                )
         else:
-            # Simple count (no grouping)
-            # Check if we need CTE for computed field filters
-            needs_version_status_filter = "versionStatus" in self.filters
-            needs_earliest_release_filter = "earliestReleaseDate" in self.filters
-            needs_cte_for_filter = needs_version_status_filter or needs_earliest_release_filter
-
-            if needs_cte_for_filter:
-                # Build CTE to compute the filtered fields
-                table_column_camelcase_fields = {"groupId", "submissionId", "submitter", "isRevocation", "versionComment"}
-                cte_select_parts = []
-                for field in self.filters.keys():
-                    if field == "versionStatus":
-                        cte_select_parts.append(f"""
-                            CASE
-                                WHEN version = MAX(version) OVER (PARTITION BY accession) THEN 'LATEST_VERSION'
-                                WHEN EXISTS (
-                                    SELECT 1 FROM sequence_entries_view sev2
-                                    WHERE sev2.accession = sequence_entries_view.accession
-                                      AND sev2.version > sequence_entries_view.version
-                                      AND sev2.is_revocation = true
-                                      AND sev2.organism = :organism
-                                      AND sev2.released_at IS NOT NULL
-                                ) THEN 'REVOKED'
-                                ELSE 'REVISED'
-                            END AS "{field}"
-                        """)
-                    elif field == "earliestReleaseDate":
-                        earliest_expr = self.build_earliest_release_date_expression()
-                        cte_select_parts.append(
-                            f"TO_CHAR({earliest_expr}, 'YYYY-MM-DD') AS \"{field}\""
-                        )
-                    elif field == "groupId":
-                        cte_select_parts.append(f'group_id AS "{field}"')
-                    elif field == "submissionId":
-                        cte_select_parts.append(f'submission_id AS "{field}"')
-                    elif field == "submitter":
-                        cte_select_parts.append(f'submitter AS "{field}"')
-                    elif field == "isRevocation":
-                        cte_select_parts.append(f'is_revocation AS "{field}"')
-                    elif field == "versionComment":
-                        cte_select_parts.append(f'version_comment AS "{field}"')
-
-                cte_select = ", ".join(cte_select_parts)
-
-                query = f"""
-                    WITH computed_fields AS (
-                        SELECT {cte_select}
-                        FROM sequence_entries_view
-                        WHERE organism = :organism
-                          AND released_at IS NOT NULL
-                """
-
-                # Add non-computed field filters in CTE
-                if self.filters:
-                    for field, value in self.filters.items():
-                        if field not in computed_fields:
-                            param_name = f"filter_{field}"
-                            query += f"\n          AND {self._get_filter_clause(field, param_name, value, params)}"
-                            if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
-                                params[param_name] = value
-
-                query += """
-                    )
-                    SELECT COUNT(*) as count
-                    FROM computed_fields
-                    WHERE 1=1
-                """
-
-                # Add computed field and table column filters in outer query
-                if self.filters:
-                    for field, value in self.filters.items():
-                        if field in computed_fields or field in table_column_camelcase_fields:
-                            param_name = f"filter_{field}"
-                            query += f'\n  AND "{field}" = :{param_name}'
-                            params[param_name] = value
-
-                filters_already_applied = True
-                group_by_clause = None
-                query_needs_groupby = False
+            if self._requires_cte(cte_candidate_fields):
+                query = self._build_aggregated_count_with_cte(params, filter_base_fields)
             else:
-                # Simple count without computed fields
-                query = """
-                    SELECT COUNT(*) as count
-                    FROM sequence_entries_view
-                    WHERE organism = :organism
-                      AND released_at IS NOT NULL
-                """
-                group_by_clause = None
-                query_needs_groupby = False
-                filters_already_applied = False
+                query = self._build_aggregated_count(params, filter_base_fields)
 
-        # Add metadata filters (if not already applied in CTE)
-        if self.filters and not filters_already_applied:
-            for field, value in self.filters.items():
-                param_name = f"filter_{field}"
-                query += f"\n  AND {self._get_filter_clause(field, param_name, value, params)}"
-                if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
-                    params[param_name] = value
+        return query, params
 
-        # Add GROUP BY if needed
-        if query_needs_groupby:
-            query += f"\nGROUP BY {group_by_clause}"
+    def _build_aggregated_query_simple(
+        self,
+        params: dict[str, Any],
+        filter_base_fields: list[str],
+        limit: int | None,
+        offset: int,
+    ) -> str:
+        fields = self.group_by_fields
+        select_parts = [self._field_definition(field).select_sql(self) for field in fields]
+        select_parts.append("COUNT(*) AS count")
+        select_clause = ",\n        ".join(select_parts)
+
+        join_fields = set(fields)
+        join_fields.update(filter_base_fields)
+        join_fields.update(self._order_dependency_fields())
+
+        query = (
+            "SELECT\n"
+            f"        {select_clause}\n"
+            f"FROM {BASE_TABLE}"
+        )
+        query += self._build_join_sql(join_fields, indent="    ")
+        query += (
+            "\nWHERE organism = :organism"
+            "\n  AND released_at IS NOT NULL"
+        )
+
+        where_clauses: list[str] = []
+        for field, value in self.filters.items():
+            self._append_filter_clause(where_clauses, field=field, value=value, params=params, use_alias=False)
+
+        for clause in where_clauses:
+            query += f"\n  AND {clause}"
+
+        group_by = ", ".join(self._field_definition(field).group_sql(self) for field in fields)
+        query += f"\nGROUP BY {group_by}"
+
+        order_clause = self.build_order_by_clause("aggregated")
+        query += f"\nORDER BY {order_clause}"
+
+        if limit is not None:
+            query += f"\nLIMIT {limit}"
+        if offset > 0:
+            query += f"\nOFFSET {offset}"
+
+        return query
+
+    def _build_aggregated_query_with_cte(
+        self,
+        params: dict[str, Any],
+        filter_base_fields: list[str],
+        limit: int | None,
+        offset: int,
+    ) -> str:
+        group_fields = self.group_by_fields
+        cte_fields = self._ordered_unique(
+            list(group_fields)
+            + filter_base_fields
+            + self._order_dependency_fields()
+        )
+
+        joins = self._collect_join_requirements(cte_fields)
+
+        select_parts = [self._field_definition(field).select_sql(self) for field in cte_fields]
+        select_clause = ",\n        ".join(select_parts)
+
+        cte_where: list[str] = []
+        outer_where: list[str] = []
+        for field, value in self.filters.items():
+            base_field, _ = self._resolve_filter_base(field)
+            if self._field_definition(base_field).requires_cte:
+                self._append_filter_clause(
+                    outer_where,
+                    field=field,
+                    value=value,
+                    params=params,
+                    use_alias=True,
+                )
+            else:
+                self._append_filter_clause(
+                    cte_where,
+                    field=field,
+                    value=value,
+                    params=params,
+                    use_alias=False,
+                )
+
+        query = (
+            "WITH computed_fields AS (\n"
+            "    SELECT\n"
+            f"        {select_clause}\n"
+            f"    FROM {BASE_TABLE}"
+        )
+        query += self._build_join_sql(joins, indent="        ")
+        query += (
+            "\n    WHERE organism = :organism"
+            "\n      AND released_at IS NOT NULL"
+        )
+        for clause in cte_where:
+            query += f"\n      AND {clause}"
+        query += "\n)\n"
+
+        group_aliases = [f'"{field}"' for field in group_fields]
+        outer_select_parts = group_aliases + ["COUNT(*) AS count"]
+        query += "SELECT " + ", ".join(outer_select_parts) + "\nFROM computed_fields"
+
+        if outer_where:
+            query += "\nWHERE 1=1"
+            for clause in outer_where:
+                query += f"\n  AND {clause}"
+
+        if group_aliases:
+            query += "\nGROUP BY " + ", ".join(group_aliases)
             query += f"\nORDER BY {self.build_order_by_clause('aggregated')}"
-
-            # Add pagination for grouped results
             if limit is not None:
                 query += f"\nLIMIT {limit}"
             if offset > 0:
                 query += f"\nOFFSET {offset}"
 
-        return query, params
+        return query
 
+    def _build_aggregated_count(
+        self,
+        params: dict[str, Any],
+        filter_base_fields: list[str],
+    ) -> str:
+        joins = self._collect_join_requirements(filter_base_fields)
+
+        query = f"SELECT COUNT(*) AS count\nFROM {BASE_TABLE}"
+        query += self._build_join_sql(joins, indent="    ")
+        query += (
+            "\nWHERE organism = :organism"
+            "\n  AND released_at IS NOT NULL"
+        )
+
+        for field, value in self.filters.items():
+            clause_list: list[str] = []
+            self._append_filter_clause(clause_list, field=field, value=value, params=params, use_alias=False)
+            for clause in clause_list:
+                query += f"\n  AND {clause}"
+
+        return query
+
+    def _build_aggregated_count_with_cte(
+        self,
+        params: dict[str, Any],
+        filter_base_fields: list[str],
+    ) -> str:
+        cte_fields = self._ordered_unique(filter_base_fields or ["accession"])
+        joins = self._collect_join_requirements(cte_fields)
+
+        select_parts = [self._field_definition(field).select_sql(self) for field in cte_fields]
+        select_clause = ",\n        ".join(select_parts)
+
+        cte_where: list[str] = []
+        outer_where: list[str] = []
+        for field, value in self.filters.items():
+            base_field, _ = self._resolve_filter_base(field)
+            if self._field_definition(base_field).requires_cte:
+                self._append_filter_clause(
+                    outer_where,
+                    field=field,
+                    value=value,
+                    params=params,
+                    use_alias=True,
+                )
+            else:
+                self._append_filter_clause(
+                    cte_where,
+                    field=field,
+                    value=value,
+                    params=params,
+                    use_alias=False,
+                )
+
+        query = (
+            "WITH computed_fields AS (\n"
+            "    SELECT\n"
+            f"        {select_clause}\n"
+            f"    FROM {BASE_TABLE}"
+        )
+        query += self._build_join_sql(joins, indent="        ")
+        query += (
+            "\n    WHERE organism = :organism"
+            "\n      AND released_at IS NOT NULL"
+        )
+        for clause in cte_where:
+            query += f"\n      AND {clause}"
+        query += "\n)\n"
+
+        query += "SELECT COUNT(*) AS count\nFROM computed_fields"
+        if outer_where:
+            query += "\nWHERE 1=1"
+            for clause in outer_where:
+                query += f"\n  AND {clause}"
+
+        return query
+
+    # ------------------------------------------------------------------
+    # Sequence queries
+    # ------------------------------------------------------------------
     def build_sequences_query(
         self,
         segment_name: str = "main",
         limit: int | None = None,
         offset: int = 0,
-    ) -> tuple[str, dict]:
-        """
-        Build query to fetch compressed sequences for decompression.
-
-        Args:
-            segment_name: Name of the nucleotide sequence segment (e.g., 'main')
-            limit: Maximum number of results
-            offset: Number of results to skip
-
-        Returns:
-            Tuple of (query_string, params_dict)
-        """
-        params = {"organism": self.organism}
-
-        # Build WHERE clause for filters
-        where_clauses = []
-        for field, value in self.filters.items():
-            param_name = f"filter_{field}"
-            where_clauses.append(self._get_filter_clause(field, param_name, value, params))
-            if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
-                params[param_name] = value
-
-        where_clause = ""
-        if where_clauses:
-            where_clause = " AND " + " AND ".join(where_clauses)
-
-        # Build query
-        query = f"""
-        SELECT
-            accession,
-            version,
-            joint_metadata -> 'alignedNucleotideSequences' -> '{segment_name}' ->> 'compressedSequence' as compressed_seq
-        FROM sequence_entries_view
-        WHERE organism = :organism
-          AND released_at IS NOT NULL
-          AND joint_metadata -> 'alignedNucleotideSequences' -> '{segment_name}' ->> 'compressedSequence' IS NOT NULL
-          {where_clause}
-        ORDER BY accession, version
-        """
-
-        if limit is not None:
-            query += f" LIMIT {limit}"
-        if offset:
-            query += f" OFFSET {offset}"
-
-        return query, params
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_sequence_query(
+            segment_key="alignedNucleotideSequences",
+            segment_name=segment_name,
+            limit=limit,
+            offset=offset,
+        )
 
     def build_unaligned_sequences_query(
         self,
         segment_name: str = "main",
         limit: int | None = None,
         offset: int = 0,
-    ) -> tuple[str, dict]:
-        """
-        Build query to fetch unaligned compressed sequences for decompression.
-        Args:
-            segment_name: Name of the nucleotide sequence segment (e.g., 'main')
-            limit: Maximum number of results
-            offset: Number of results to skip
-        Returns:
-            Tuple of (query_string, params_dict)
-        """
-        params = {"organism": self.organism}
-        # Build WHERE clause for filters
-        where_clauses = []
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_sequence_query(
+            segment_key="unalignedNucleotideSequences",
+            segment_name=segment_name,
+            limit=limit,
+            offset=offset,
+        )
+
+    def _build_sequence_query(
+        self,
+        *,
+        segment_key: str,
+        segment_name: str,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[str, dict[str, Any]]:
+        params: dict[str, Any] = {"organism": self.organism}
+
+        json_path = (
+            "joint_metadata -> '{key}' -> '{segment}' ->> 'compressedSequence'"
+            .format(key=segment_key, segment=segment_name)
+        )
+
+        simple_filters: list[tuple[str, Any]] = []
+        computed_filters: list[tuple[str, Any]] = []
         for field, value in self.filters.items():
-            param_name = f"filter_{field}"
-            where_clauses.append(self._get_filter_clause(field, param_name, value, params))
-            if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
-                params[param_name] = value
+            base_field, _ = self._resolve_filter_base(field)
+            if self._field_definition(base_field).requires_cte:
+                computed_filters.append((field, value))
+            else:
+                simple_filters.append((field, value))
 
-        where_clause = ""
-        if where_clauses:
-            where_clause = " AND " + " AND ".join(where_clauses)
+        if not computed_filters:
+            where_clauses: list[str] = []
+            for field, value in simple_filters:
+                self._append_filter_clause(where_clauses, field=field, value=value, params=params, use_alias=False)
 
-        # Build query - note: unalignedNucleotideSequences instead of alignedNucleotideSequences
-        query = f"""
-        SELECT
-            accession,
-            version,
-            joint_metadata -> 'unalignedNucleotideSequences' -> '{segment_name}' ->> 'compressedSequence' as compressed_seq
-        FROM sequence_entries_view
-        WHERE organism = :organism
-          AND released_at IS NOT NULL
-          AND joint_metadata -> 'unalignedNucleotideSequences' -> '{segment_name}' ->> 'compressedSequence' IS NOT NULL
-          {where_clause}
-        ORDER BY accession, version
-        """
+            query = (
+                "SELECT\n"
+                "        accession,\n"
+                "        version,\n"
+                f"        {json_path} AS compressed_seq\n"
+                f"FROM {BASE_TABLE}\n"
+                "WHERE organism = :organism\n"
+                "  AND released_at IS NOT NULL\n"
+                f"  AND {json_path} IS NOT NULL"
+            )
+
+            for clause in where_clauses:
+                query += f"\n  AND {clause}"
+
+            query += "\nORDER BY \"accession\", \"version\""
+
+            if limit is not None:
+                query += f"\nLIMIT {limit}"
+            if offset:
+                query += f"\nOFFSET {offset}"
+
+            return query, params
+
+        # Build CTE to support computed-field filters
+        computed_field_names = self._ordered_unique(
+            [self._resolve_filter_base(field)[0] for field, _ in computed_filters]
+        )
+        select_field_names = self._ordered_unique(["accession", "version"] + computed_field_names)
+        join_fields = set(select_field_names)
+        join_fields.update(self._resolve_filter_base(field)[0] for field, _ in simple_filters)
+
+        select_parts = [self._field_definition(name).select_sql(self) for name in select_field_names]
+        select_parts.append(f"{json_path} AS compressed_seq")
+        select_clause = ",\n        ".join(select_parts)
+
+        cte_where: list[str] = []
+        for field, value in simple_filters:
+            self._append_filter_clause(cte_where, field=field, value=value, params=params, use_alias=False)
+
+        query = (
+            "WITH computed_sequences AS (\n"
+            "    SELECT\n"
+            f"        {select_clause}\n"
+            f"    FROM {BASE_TABLE}"
+        )
+        query += self._build_join_sql(join_fields, indent="        ")
+        query += (
+            "\n    WHERE organism = :organism"
+            "\n      AND released_at IS NOT NULL"
+            f"\n      AND {json_path} IS NOT NULL"
+        )
+        for clause in cte_where:
+            query += f"\n      AND {clause}"
+        query += "\n)\n"
+
+        query += "SELECT \"accession\", \"version\", compressed_seq\nFROM computed_sequences"
+
+        if computed_filters:
+            query += "\nWHERE 1=1"
+            computed_where: list[str] = []
+            for field, value in computed_filters:
+                self._append_filter_clause(
+                    computed_where,
+                    field=field,
+                    value=value,
+                    params=params,
+                    use_alias=True,
+                )
+            for clause in computed_where:
+                query += f"\n  AND {clause}"
+
+        query += "\nORDER BY \"accession\", \"version\""
 
         if limit is not None:
-            query += f" LIMIT {limit}"
+            query += f"\nLIMIT {limit}"
         if offset:
-            query += f" OFFSET {offset}"
+            query += f"\nOFFSET {offset}"
 
         return query, params
 
+    # ------------------------------------------------------------------
+    # Details queries
+    # ------------------------------------------------------------------
     def build_details_query(
-        self, selected_fields: list[str] | None = None, limit: int | None = None, offset: int = 0
+        self,
+        selected_fields: list[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[str, dict[str, Any]]:
-        """
-        Build details query to retrieve metadata.
+        params: dict[str, Any] = {"organism": self.organism}
 
-        Returns: (query_string, bind_params)
-        """
-        params = {"organism": self.organism}
+        select_all = selected_fields is None
+        fields = selected_fields or self._default_details_fields()
+        fields = self._ordered_unique(fields)
 
-        # Computed fields that need special handling
-        computed_fields = {
+        filter_base_fields = self._filter_base_fields()
+        order_dependency_fields = self._order_dependency_fields()
+
+        cte_candidate_fields = set(fields)
+        cte_candidate_fields.update(filter_base_fields)
+        cte_candidate_fields.update(order_dependency_fields)
+        cte_candidate_fields.add("accession")  # ensure default ordering is supported
+
+        if self._requires_cte(cte_candidate_fields):
+            query = self._build_details_query_with_cte(
+                params,
+                fields,
+                filter_base_fields,
+                select_all,
+                limit,
+                offset,
+            )
+        else:
+            query = self._build_details_query_simple(
+                params,
+                fields,
+                limit,
+                offset,
+            )
+
+        return query, params
+
+    def _build_details_query_with_cte(
+        self,
+        params: dict[str, Any],
+        fields: list[str],
+        filter_base_fields: list[str],
+        select_all: bool,
+        limit: int | None,
+        offset: int,
+    ) -> str:
+        cte_fields = self._ordered_unique(
+            fields + filter_base_fields + self._order_dependency_fields() + ["accession"]
+        )
+
+        joins = self._collect_join_requirements(cte_fields)
+        select_parts = [self._field_definition(field).select_sql(self) for field in cte_fields]
+        select_clause = ",\n        ".join(select_parts)
+
+        cte_where: list[str] = []
+        outer_where: list[str] = []
+        for field, value in self.filters.items():
+            base_field, _ = self._resolve_filter_base(field)
+            if self._field_definition(base_field).requires_cte:
+                self._append_filter_clause(
+                    outer_where,
+                    field=field,
+                    value=value,
+                    params=params,
+                    use_alias=True,
+                )
+            else:
+                self._append_filter_clause(
+                    cte_where,
+                    field=field,
+                    value=value,
+                    params=params,
+                    use_alias=False,
+                )
+
+        query = (
+            "WITH computed_fields AS (\n"
+            "    SELECT\n"
+            f"        {select_clause}\n"
+            f"    FROM {BASE_TABLE}"
+        )
+        query += self._build_join_sql(joins, indent="        ")
+        query += (
+            "\n    WHERE organism = :organism"
+            "\n      AND released_at IS NOT NULL"
+        )
+        for clause in cte_where:
+            query += f"\n      AND {clause}"
+        query += "\n)\n"
+
+        if select_all:
+            outer_select = "*"
+        else:
+            outer_select = ", ".join(f'"{field}"' for field in fields)
+
+        query += f"SELECT {outer_select}\nFROM computed_fields"
+
+        if outer_where:
+            query += "\nWHERE 1=1"
+            for clause in outer_where:
+                query += f"\n  AND {clause}"
+
+        order_clause = self.build_order_by_clause("details")
+        query += f"\nORDER BY {order_clause}"
+
+        if limit is not None:
+            query += f"\nLIMIT {limit}"
+        if offset > 0:
+            query += f"\nOFFSET {offset}"
+
+        return query
+
+    def _build_details_query_simple(
+        self,
+        params: dict[str, Any],
+        fields: list[str],
+        limit: int | None,
+        offset: int,
+    ) -> str:
+        select_parts = [self._field_definition(field).select_sql(self) for field in fields]
+        select_clause = ",\n        ".join(select_parts)
+
+        join_fields = set(fields)
+        join_fields.update(self._filter_base_fields())
+        join_fields.update(self._order_dependency_fields())
+
+        query = (
+            "SELECT\n"
+            f"        {select_clause}\n"
+            f"FROM {BASE_TABLE}"
+        )
+        query += self._build_join_sql(join_fields, indent="    ")
+        query += (
+            "\nWHERE organism = :organism"
+            "\n  AND released_at IS NOT NULL"
+        )
+
+        where_clauses: list[str] = []
+        for field, value in self.filters.items():
+            self._append_filter_clause(where_clauses, field=field, value=value, params=params, use_alias=False)
+
+        for clause in where_clauses:
+            query += f"\n  AND {clause}"
+
+        order_clause = self.build_order_by_clause("details")
+        query += f"\nORDER BY {order_clause}"
+
+        if limit is not None:
+            query += f"\nLIMIT {limit}"
+        if offset > 0:
+            query += f"\nOFFSET {offset}"
+
+        return query
+
+    # ------------------------------------------------------------------
+    # Field-specific expression helpers
+    # ------------------------------------------------------------------
+    def _earliest_release_timestamp_expr(self) -> str:
+        if not self.organism_config:
+            return "released_at"
+
+        earliest_config = self.organism_config.schema.get("earliestReleaseDate", {})
+        if not earliest_config.get("enabled", False):
+            return "released_at"
+
+        external_fields = earliest_config.get("externalFields", [])
+        parts = ["released_at"]
+        for field in external_fields:
+            json_key = field.replace("'", "''")
+            parts.append(f"(joint_metadata -> 'metadata' ->> '{json_key}')::timestamp")
+
+        least_expr = "LEAST(" + ", ".join(parts) + ")"
+        window_min = (
+            "MIN({least}) OVER (PARTITION BY {table}.accession "
+            "ORDER BY version ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)"
+        ).format(least=least_expr, table=BASE_TABLE)
+
+        return f"LEAST({least_expr}, {window_min})"
+
+    def _version_status_expression(self) -> str:
+        return (
+            "CASE\n"
+            f"    WHEN version = MAX(version) OVER (PARTITION BY {BASE_TABLE}.accession) THEN 'LATEST_VERSION'\n"
+            "    WHEN EXISTS (\n"
+            "        SELECT 1 FROM sequence_entries_view sev2\n"
+            "        WHERE sev2.accession = sequence_entries_view.accession\n"
+            "          AND sev2.version > sequence_entries_view.version\n"
+            "          AND sev2.is_revocation = true\n"
+            "          AND sev2.organism = :organism\n"
+            "          AND sev2.released_at IS NOT NULL\n"
+            "    ) THEN 'REVOKED'\n"
+            "    ELSE 'REVISED'\n"
+            "END"
+        )
+
+    def _data_use_terms_expr(self) -> str:
+        if not self.organism_config:
+            return "'OPEN'"
+
+        data_config = (self.organism_config.backend_config or {}).get("dataUseTerms", {})
+        if not data_config.get("enabled", False):
+            return "'OPEN'"
+
+        return (
+            "CASE\n"
+            "    WHEN data_use_terms_table.data_use_terms_type = 'RESTRICTED'\n"
+            "         AND data_use_terms_table.restricted_until > NOW()\n"
+            "    THEN 'RESTRICTED'\n"
+            "    ELSE 'OPEN'\n"
+            "END"
+        )
+
+    def _data_use_terms_restricted_until_expr(self) -> str:
+        if not self.organism_config:
+            return "NULL"
+
+        data_config = (self.organism_config.backend_config or {}).get("dataUseTerms", {})
+        if not data_config.get("enabled", False):
+            return "NULL"
+
+        return (
+            "CASE\n"
+            "    WHEN data_use_terms_table.data_use_terms_type = 'RESTRICTED'\n"
+            "         AND data_use_terms_table.restricted_until > NOW()\n"
+            "    THEN TO_CHAR(data_use_terms_table.restricted_until, 'YYYY-MM-DD')\n"
+            "    ELSE NULL\n"
+            "END"
+        )
+
+    def _data_use_terms_url_expr(self) -> str:
+        if not self.organism_config:
+            return "NULL"
+
+        backend_config = (self.organism_config.backend_config or {}).get("dataUseTerms", {})
+        if not backend_config.get("enabled", False):
+            return "NULL"
+
+        urls = backend_config.get("urls", {})
+        open_url = urls.get("open", "")
+        restricted_url = urls.get("restricted", "")
+
+        return (
+            "CASE\n"
+            "    WHEN data_use_terms_table.data_use_terms_type = 'RESTRICTED'\n"
+            "         AND data_use_terms_table.restricted_until > NOW()\n"
+            f"    THEN '{restricted_url}'\n"
+            f"    ELSE '{open_url}'\n"
+            "END"
+        )
+
+    def _default_details_fields(self) -> list[str]:
+        fields = [
+            "accession",
+            "version",
             "accessionVersion",
             "displayName",
             "versionStatus",
@@ -674,278 +900,109 @@ class QueryBuilder:
             "dataUseTerms",
             "dataUseTermsRestrictedUntil",
             "dataUseTermsUrl",
-        }
+        ]
 
-        # Check if versionStatus or earliestReleaseDate is requested or filtered
-        needs_version_status = (selected_fields and "versionStatus" in selected_fields) or "versionStatus" in self.filters
-        needs_earliest_release = (selected_fields and "earliestReleaseDate" in selected_fields) or "earliestReleaseDate" in self.filters
-        needs_accession_version = (selected_fields and "accessionVersion" in selected_fields) or "accessionVersion" in self.filters
-        needs_display_name = (selected_fields and "displayName" in selected_fields) or "displayName" in self.filters
+        if self.organism_config and self.organism_config.schema:
+            metadata_schema = self.organism_config.schema.get("metadata", [])
+            for field_def in metadata_schema:
+                name = field_def.get("name")
+                if name:
+                    fields.append(name)
 
-        # If we need versionStatus, earliestReleaseDate, accessionVersion, or displayName (for selection or filtering), use CTE
-        # Also use CTE if no fields specified (default: return all fields)
-        needs_cte = needs_version_status or needs_earliest_release or needs_accession_version or needs_display_name or (selected_fields is None)
+        return self._ordered_unique(fields)
 
-        if needs_cte:
-            # Determine all fields we need to compute (selected fields + filtered fields)
-            if selected_fields is None:
-                # When no fields specified, build ALL available fields
-                all_fields = set(computed_fields)
-                # Add basic table columns
-                all_fields.add("accession")
-                all_fields.add("version")
-                # Add all metadata fields from schema
-                if self.organism_config and self.organism_config.schema:
-                    metadata_schema = self.organism_config.schema.get("metadata", [])
-                    for field_def in metadata_schema:
-                        field_name = field_def.get("name")
-                        if field_name:
-                            all_fields.add(field_name)
-                # Add filtered fields
-                all_fields.update(self.filters.keys())
-            else:
-                all_fields = set(selected_fields)
-                all_fields.update(self.filters.keys())
-                # Always include accession for ordering
-                all_fields.add("accession")
 
-            # Build SELECT clause for CTE
-            select_parts = []
-            for field in all_fields:
-                if field == "accession":
-                    select_parts.append("sequence_entries_view.accession AS accession")
-                elif field == "version":
-                    select_parts.append("version")
-                elif field == "accessionVersion" or field == "displayName":
-                    select_parts.append(f"(sequence_entries_view.accession || '.' || version) AS \"{field}\"")
-                elif field == "submittedDate":
-                    select_parts.append(f"TO_CHAR(submitted_at, 'YYYY-MM-DD') AS \"{field}\"")
-                elif field == "submittedAtTimestamp":
-                    select_parts.append(
-                        f"EXTRACT(EPOCH FROM submitted_at)::bigint AS \"{field}\""
-                    )
-                elif field == "releasedDate":
-                    select_parts.append(f"TO_CHAR(released_at, 'YYYY-MM-DD') AS \"{field}\"")
-                elif field == "releasedAtTimestamp":
-                    select_parts.append(
-                        f"EXTRACT(EPOCH FROM released_at)::bigint AS \"{field}\""
-                    )
-                elif field == "versionStatus":
-                    # Compute versionStatus using window functions
-                    select_parts.append(f"""
-                        CASE
-                            WHEN version = MAX(version) OVER (PARTITION BY sequence_entries_view.accession) THEN 'LATEST_VERSION'
-                            WHEN EXISTS (
-                                SELECT 1 FROM sequence_entries_view sev2
-                                WHERE sev2.accession = sequence_entries_view.accession
-                                  AND sev2.version > sequence_entries_view.version
-                                  AND sev2.is_revocation = true
-                                  AND sev2.organism = :organism
-                                  AND sev2.released_at IS NOT NULL
-                            ) THEN 'REVOKED'
-                            ELSE 'REVISED'
-                        END AS "{field}"
-                    """)
-                elif field == "earliestReleaseDate":
-                    earliest_expr = self.build_earliest_release_date_expression()
-                    select_parts.append(
-                        f"TO_CHAR({earliest_expr}, 'YYYY-MM-DD') AS \"{field}\""
-                    )
-                elif field == "submissionId":
-                    select_parts.append(f'submission_id AS "{field}"')
-                elif field == "submitter":
-                    select_parts.append(f'submitter AS "{field}"')
-                elif field == "groupId":
-                    select_parts.append(f'sequence_entries_view.group_id AS "{field}"')
-                elif field == "isRevocation":
-                    select_parts.append(f'is_revocation AS "{field}"')
-                elif field == "versionComment":
-                    select_parts.append(f'version_comment AS "{field}"')
-                elif field == "groupName":
-                    select_parts.append(f'groups_table.group_name AS "{field}"')
-                elif field == "dataUseTerms":
-                    data_use_expr = self.build_data_use_terms_expression()
-                    select_parts.append(f'({data_use_expr}) AS "{field}"')
-                elif field == "dataUseTermsRestrictedUntil":
-                    restricted_until_expr = self.build_data_use_terms_restricted_until_expression()
-                    select_parts.append(f'({restricted_until_expr}) AS "{field}"')
-                elif field == "dataUseTermsUrl":
-                    url_expr = self.build_data_use_terms_url_expression()
-                    select_parts.append(f'({url_expr}) AS "{field}"')
-                else:
-                    # Metadata field from JSONB
-                    select_parts.append(
-                        f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
-                    )
-            cte_select_clause = ", ".join(select_parts)
-
-            # Determine which fields to select in outer query
-            if selected_fields:
-                outer_select_parts = [f'"{field}"' for field in selected_fields]
-                outer_select_clause = ", ".join(outer_select_parts)
-            else:
-                # Select all computed fields
-                outer_select_clause = "*"
-
-            # Check if we need JOINs in the CTE
-            needs_groups_join = "groupName" in all_fields
-            needs_data_use_terms_join = any(
-                f in all_fields for f in ["dataUseTerms", "dataUseTermsRestrictedUntil", "dataUseTermsUrl"]
-            )
-
-            # Build FROM clause with necessary JOINs
-            from_clause = "FROM sequence_entries_view"
-            if needs_groups_join:
-                from_clause += "\n                    LEFT JOIN groups_table ON sequence_entries_view.group_id = groups_table.group_id"
-            if needs_data_use_terms_join:
-                from_clause += "\n                    LEFT JOIN data_use_terms_table ON sequence_entries_view.accession = data_use_terms_table.accession"
-
-            # Build the CTE query
-            query = f"""
-                WITH computed_fields AS (
-                    SELECT {cte_select_clause}
-                    {from_clause}
-                    WHERE organism = :organism
-                      AND released_at IS NOT NULL
-            """
-
-            # Add metadata filters (only non-computed fields in CTE WHERE clause)
-            if self.filters:
-                for field, value in self.filters.items():
-                    if field not in computed_fields:
-                        param_name = f"filter_{field}"
-                        query += f"\n          AND {self._get_filter_clause(field, param_name, value, params)}"
-                        if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
-                            params[param_name] = value
-
-            # Close the CTE and select from it
-            query += f"""
-                )
-                SELECT {outer_select_clause}
-                FROM computed_fields
-                WHERE 1=1
-            """
-
-            # Add computed field filters in outer WHERE clause
-            if self.filters:
-                for field, value in self.filters.items():
-                    if field in computed_fields:
-                        # Computed field - filter in outer query
-                        param_name = f"filter_{field}"
-                        if isinstance(value, list):
-                            # Create individual parameters for each list item
-                            param_placeholders = []
-                            for i, item in enumerate(value):
-                                item_param_name = f"{param_name}_{i}"
-                                param_placeholders.append(f":{item_param_name}")
-                                params[item_param_name] = item
-                            param_str = f"({', '.join(param_placeholders)})"
-                            query += f'\n  AND "{field}" IN {param_str}'
-                        else:
-                            query += f'\n  AND "{field}" = :{param_name}'
-                            params[param_name] = value
-
-            # Add pagination
-            query += f"\nORDER BY {self.build_order_by_clause('details')}"
-            if limit is not None:
-                query += f"\nLIMIT {limit}"
-            if offset > 0:
-                query += f"\nOFFSET {offset}"
-
-            return query, params
-
-        else:
-            # Simpler query without computed fields that need CTE
-            if selected_fields:
-                select_parts = []
-                for field in selected_fields:
-                    if field == "accession":
-                        select_parts.append("sequence_entries_view.accession AS accession")
-                    elif field == "version":
-                        select_parts.append("version")
-                    elif field == "accessionVersion" or field == "displayName":
-                        select_parts.append(f"(accession || '.' || version) AS \"{field}\"")
-                    elif field == "submittedDate":
-                        select_parts.append(f"TO_CHAR(submitted_at, 'YYYY-MM-DD') AS \"{field}\"")
-                    elif field == "submittedAtTimestamp":
-                        select_parts.append(
-                            f"EXTRACT(EPOCH FROM submitted_at)::bigint AS \"{field}\""
-                        )
-                    elif field == "releasedDate":
-                        select_parts.append(f"TO_CHAR(released_at, 'YYYY-MM-DD') AS \"{field}\"")
-                    elif field == "releasedAtTimestamp":
-                        select_parts.append(
-                            f"EXTRACT(EPOCH FROM released_at)::bigint AS \"{field}\""
-                        )
-                    elif field == "earliestReleaseDate":
-                        earliest_expr = self.build_earliest_release_date_expression()
-                        select_parts.append(
-                            f"TO_CHAR({earliest_expr}, 'YYYY-MM-DD') AS \"{field}\""
-                        )
-                    elif field == "submissionId":
-                        select_parts.append(f'submission_id AS "{field}"')
-                    elif field == "submitter":
-                        select_parts.append(f'submitter AS "{field}"')
-                    elif field == "groupId":
-                        select_parts.append(f'sequence_entries_view.group_id AS "{field}"')
-                    elif field == "isRevocation":
-                        select_parts.append(f'is_revocation AS "{field}"')
-                    elif field == "versionComment":
-                        select_parts.append(f'version_comment AS "{field}"')
-                    elif field == "groupName":
-                        select_parts.append(f'groups_table.group_name AS "{field}"')
-                    elif field == "dataUseTerms":
-                        data_use_expr = self.build_data_use_terms_expression()
-                        select_parts.append(f'({data_use_expr}) AS "{field}"')
-                    elif field == "dataUseTermsRestrictedUntil":
-                        restricted_until_expr = self.build_data_use_terms_restricted_until_expression()
-                        select_parts.append(f'({restricted_until_expr}) AS "{field}"')
-                    elif field == "dataUseTermsUrl":
-                        url_expr = self.build_data_use_terms_url_expression()
-                        select_parts.append(f'({url_expr}) AS "{field}"')
-                    else:
-                        # Metadata field from JSONB
-                        select_parts.append(
-                            f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
-                        )
-                select_clause = ", ".join(select_parts)
-            else:
-                # Return all metadata
-                select_clause = "accession, version, joint_metadata -> 'metadata' AS metadata"
-
-        # Check if we need JOINs
-        needs_groups_join = selected_fields and "groupName" in selected_fields
-        needs_data_use_terms_join = selected_fields and any(
-            f in selected_fields for f in ["dataUseTerms", "dataUseTermsRestrictedUntil", "dataUseTermsUrl"]
-        )
-
-        # Build FROM clause with necessary JOINs
-        from_clause = "FROM sequence_entries_view"
-        if needs_groups_join:
-            from_clause += "\n                LEFT JOIN groups_table ON sequence_entries_view.group_id = groups_table.group_id"
-        if needs_data_use_terms_join:
-            from_clause += "\n                LEFT JOIN data_use_terms_table ON sequence_entries_view.accession = data_use_terms_table.accession"
-
-        query = f"""
-            SELECT {select_clause}
-            {from_clause}
-            WHERE organism = :organism
-              AND released_at IS NOT NULL
-        """
-
-        # Add metadata filters
-        if self.filters:
-            for field, value in self.filters.items():
-                param_name = f"filter_{field}"
-                query += f"\n  AND {self._get_filter_clause(field, param_name, value, params)}"
-                if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
-                    params[param_name] = value
-
-        # Add pagination
-        query += f"\nORDER BY {self.build_order_by_clause('details')}"
-        if limit is not None:
-            query += f"\nLIMIT {limit}"
-        if offset > 0:
-            query += f"\nOFFSET {offset}"
-
-        return query, params
+FIELD_DEFINITIONS: dict[str, FieldDefinition] = {
+    "accession": FieldDefinition(
+        name="accession",
+        expression_factory=lambda _: f"{BASE_TABLE}.accession",
+        order_base=(f"{BASE_TABLE}.accession",),
+        order_alias=('"accession"',),
+    ),
+    "version": FieldDefinition(
+        name="version",
+        expression_factory=lambda _: "version",
+        order_base=("version",),
+        order_alias=('"version"',),
+    ),
+    "accessionVersion": FieldDefinition(
+        name="accessionVersion",
+        expression_factory=lambda _: f"{BASE_TABLE}.accession || '.' || {BASE_TABLE}.version",
+        order_base=(f"{BASE_TABLE}.accession", "version"),
+        order_alias=('"accession"', '"version"'),
+        order_dependencies=("accession", "version"),
+    ),
+    "displayName": FieldDefinition(
+        name="displayName",
+        expression_factory=lambda _: f"{BASE_TABLE}.accession || '.' || {BASE_TABLE}.version",
+        order_base=(f"{BASE_TABLE}.accession", "version"),
+        order_alias=('"accession"', '"version"'),
+        order_dependencies=("accession", "version"),
+    ),
+    "submittedDate": FieldDefinition(
+        name="submittedDate",
+        expression_factory=lambda _: "TO_CHAR(submitted_at, 'YYYY-MM-DD')",
+    ),
+    "submittedAtTimestamp": FieldDefinition(
+        name="submittedAtTimestamp",
+        expression_factory=lambda _: "EXTRACT(EPOCH FROM submitted_at)::bigint",
+    ),
+    "releasedDate": FieldDefinition(
+        name="releasedDate",
+        expression_factory=lambda _: "TO_CHAR(released_at, 'YYYY-MM-DD')",
+    ),
+    "releasedAtTimestamp": FieldDefinition(
+        name="releasedAtTimestamp",
+        expression_factory=lambda _: "EXTRACT(EPOCH FROM released_at)::bigint",
+    ),
+    "earliestReleaseDate": FieldDefinition(
+        name="earliestReleaseDate",
+        expression_factory=lambda builder: f"TO_CHAR({builder._earliest_release_timestamp_expr()}, 'YYYY-MM-DD')",
+        requires_cte=True,
+    ),
+    "submissionId": FieldDefinition(
+        name="submissionId",
+        expression_factory=lambda _: "submission_id",
+    ),
+    "submitter": FieldDefinition(
+        name="submitter",
+        expression_factory=lambda _: "submitter",
+    ),
+    "groupId": FieldDefinition(
+        name="groupId",
+        expression_factory=lambda _: f"{BASE_TABLE}.group_id",
+    ),
+    "groupName": FieldDefinition(
+        name="groupName",
+        expression_factory=lambda _: "groups_table.group_name",
+        joins=(JOIN_GROUPS,),
+    ),
+    "isRevocation": FieldDefinition(
+        name="isRevocation",
+        expression_factory=lambda _: "is_revocation",
+    ),
+    "versionComment": FieldDefinition(
+        name="versionComment",
+        expression_factory=lambda _: "version_comment",
+    ),
+    "versionStatus": FieldDefinition(
+        name="versionStatus",
+        expression_factory=lambda builder: builder._version_status_expression(),
+        requires_cte=True,
+    ),
+    "dataUseTerms": FieldDefinition(
+        name="dataUseTerms",
+        expression_factory=lambda builder: builder._data_use_terms_expr(),
+        joins=(JOIN_DATA_USE_TERMS,),
+    ),
+    "dataUseTermsRestrictedUntil": FieldDefinition(
+        name="dataUseTermsRestrictedUntil",
+        expression_factory=lambda builder: builder._data_use_terms_restricted_until_expr(),
+        joins=(JOIN_DATA_USE_TERMS,),
+    ),
+    "dataUseTermsUrl": FieldDefinition(
+        name="dataUseTermsUrl",
+        expression_factory=lambda builder: builder._data_use_terms_url_expr(),
+        joins=(JOIN_DATA_USE_TERMS,),
+    ),
+}

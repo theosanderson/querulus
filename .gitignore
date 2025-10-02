@@ -31,5 +31,13 @@ htmlcov/
 
 # Config (in development, mount from ConfigMap in production)
 config/querulus_config.json
+config_unprocessed/
+
+# Debug and test scripts
+debug_*.py
+test_*.py
+
+# Logs
+*.log
 
 # Note: LAPIS and loculus are git submodules - tracked separately

@@ -134,8 +134,13 @@ class QueryBuilder:
         }
         for key, value in params.items():
             if key not in special_params and value is not None:
+                # Handle isRevocation: convert string to bool for PostgreSQL boolean column
                 if key == "isRevocation" and isinstance(value, str):
                     value = value.lower() == "true"
+                # Convert boolean values to lowercase strings for JSONB metadata fields
+                # (fields not in FIELD_DEFINITIONS are stored as text in JSONB)
+                elif isinstance(value, bool) and key not in FIELD_DEFINITIONS:
+                    value = "true" if value else "false"
                 self.filters[key] = value
         return self
 

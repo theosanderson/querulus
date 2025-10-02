@@ -239,18 +239,13 @@ async def post_aggregated(organism: str, body: dict = {}):
     builder.set_group_by_fields(group_by_fields)
     builder.set_order_by_fields(order_by_fields)
 
-    # Add filters (excluding special fields), converting camelCase to snake_case
+    # Add filters (excluding special fields)
     filter_params = {}
     for k, v in body.items():
         if k not in ["fields", "limit", "offset", "orderBy",
                     "nucleotideMutations", "aminoAcidMutations",
                     "nucleotideInsertions", "aminoAcidInsertions"]:
-            # Convert isRevocation -> is_revocation and string to boolean
-            if k == "isRevocation":
-                # Convert string "true"/"false" to Python boolean
-                filter_params["is_revocation"] = v if isinstance(v, bool) else v.lower() == "true"
-            else:
-                filter_params[k] = v
+            filter_params[k] = v
     builder.add_filters_from_params(filter_params)
 
     # Execute query
@@ -429,18 +424,13 @@ async def post_details(organism: str, body: dict = {}):
     builder = QueryBuilder(organism, organism_config)
     builder.set_order_by_fields(order_by_fields)
 
-    # Add filters (excluding special fields), converting camelCase to snake_case
+    # Add filters (excluding special fields)
     filter_params = {}
     for k, v in body.items():
         if k not in ["fields", "limit", "offset", "orderBy",
                     "nucleotideMutations", "aminoAcidMutations",
                     "nucleotideInsertions", "aminoAcidInsertions"]:
-            # Convert isRevocation -> is_revocation and string to boolean
-            if k == "isRevocation":
-                # Convert string "true"/"false" to Python boolean
-                filter_params["is_revocation"] = v if isinstance(v, bool) else v.lower() == "true"
-            else:
-                filter_params[k] = v
+            filter_params[k] = v
     builder.add_filters_from_params(filter_params)
 
     # Execute query

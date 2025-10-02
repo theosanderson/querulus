@@ -137,8 +137,19 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
    - Ensure all field names match exactly (case-sensitive)
    - Test edge cases (null values, missing data, etc.)
 
-6. **Error handling improvements**:
-   - Better error messages for invalid parameters
+6. **Query parameter validation**:
+   - Validate that all query parameters are recognized/supported
+   - Raise HTTP 400 error for unexpected/unknown parameters
+   - Build allowlist of valid parameters per endpoint:
+     - Common: fields, limit, offset, orderBy, dataFormat, downloadAsFile, downloadFileBasename
+     - Metadata fields from organism config
+     - Computed fields from FIELD_DEFINITIONS
+     - Range query suffixes: {field}From, {field}To
+   - Provide helpful error message listing valid parameters
+   - Match LAPIS error response format
+
+7. **Error handling improvements**:
+   - Better error messages for invalid parameter values
    - HTTP 400 for bad requests with clear error descriptions
    - HTTP 404 for invalid organisms
    - Match LAPIS error response format

@@ -602,6 +602,55 @@ class TestRangeQueries:
         assert compare_counts(lapis_data, querulus_data)
 
 
+class TestBooleanFields:
+    """Test boolean field filtering"""
+
+    def test_filter_by_is_revocation_false(self, config: TestConfig):
+        """Test filtering by isRevocation=false (boolean field)"""
+        params = {"isRevocation": "false", "versionStatus": "LATEST_VERSION"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/aggregated"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/aggregated"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()["data"]
+        querulus_data = querulus_resp.json()["data"]
+
+        assert compare_counts(lapis_data, querulus_data)
+
+    def test_filter_by_is_revocation_true(self, config: TestConfig):
+        """Test filtering by isRevocation=true (boolean field)"""
+        params = {"isRevocation": "true"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/aggregated"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/aggregated"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()["data"]
+        querulus_data = querulus_resp.json()["data"]
+
+        assert compare_counts(lapis_data, querulus_data)
+
+    def test_post_filter_by_is_revocation_false(self, config: TestConfig):
+        """Test POST filtering by isRevocation=false (boolean in JSON body)"""
+        body = {"isRevocation": False, "versionStatus": "LATEST_VERSION"}
+
+        lapis_resp = requests.post(config.lapis_endpoint("sample/aggregated"), json=body)
+        querulus_resp = requests.post(config.querulus_endpoint("sample/aggregated"), json=body)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()["data"]
+        querulus_data = querulus_resp.json()["data"]
+
+        assert compare_counts(lapis_data, querulus_data)
+
+
 class TestDataFormats:
     """Test different data format options (JSON, FASTA, TSV)"""
 

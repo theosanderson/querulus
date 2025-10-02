@@ -67,19 +67,46 @@ class FieldDefinition:
 _METADATA_FIELD_CACHE: dict[str, FieldDefinition] = {}
 
 
-def _metadata_field_definition(field: str) -> FieldDefinition:
+def _metadata_field_definition(field: str, builder: "QueryBuilder | None" = None) -> FieldDefinition:
     """Create and cache a definition for a metadata JSON field."""
-    cached = _METADATA_FIELD_CACHE.get(field)
+    # For metadata fields, we need to consider the field type from the organism config
+    # to properly cast numeric and date fields for comparisons
+    cache_key = field
+    if builder and builder.organism_config:
+        # Include organism in cache key since field types can vary by organism
+        cache_key = f"{builder.organism}:{field}"
+
+    cached = _METADATA_FIELD_CACHE.get(cache_key)
     if cached:
         return cached
 
     json_key = field.replace("'", "''")
 
-    def metadata_expr(_: "QueryBuilder", key: str = json_key) -> str:
-        return f"joint_metadata -> 'metadata' ->> '{key}'"
+    def metadata_expr(b: "QueryBuilder", key: str = json_key) -> str:
+        # Determine the field type from organism config
+        field_type = None
+        if b.organism_config and b.organism_config.schema:
+            metadata_schema = b.organism_config.schema.get("metadata", [])
+            for field_def in metadata_schema:
+                if field_def.get("name") == field:
+                    field_type = field_def.get("type")
+                    break
+
+        # Build the JSON extraction expression with appropriate casting
+        base_expr = f"joint_metadata -> 'metadata' ->> '{key}'"
+
+        if field_type == "int":
+            return f"({base_expr})::int"
+        elif field_type == "float":
+            return f"({base_expr})::float"
+        elif field_type == "date":
+            return f"({base_expr})::date"
+        else:
+            # Default: return as text
+            return base_expr
 
     definition = FieldDefinition(name=field, expression_factory=metadata_expr)
-    _METADATA_FIELD_CACHE[field] = definition
+    _METADATA_FIELD_CACHE[cache_key] = definition
     return definition
 
 
@@ -127,7 +154,7 @@ class QueryBuilder:
         definition = FIELD_DEFINITIONS.get(field)
         if definition:
             return definition
-        return _metadata_field_definition(field)
+        return _metadata_field_definition(field, self)
 
     def _resolve_filter_base(self, field: str) -> tuple[str, str | None]:
         if field.endswith("From"):
@@ -203,8 +230,52 @@ class QueryBuilder:
             operator,
             params,
             param_prefix,
+            base_field,
         )
         clauses.append(clause)
+
+    def _get_field_type(self, field: str) -> str | None:
+        """Get the type of a field from the organism config.
+
+        Only returns type for metadata fields. Computed fields like earliestReleaseDate
+        are already formatted and don't need type conversion.
+        """
+        # If it's a computed field in FIELD_DEFINITIONS, don't return a type
+        # These fields are already properly formatted
+        if field in FIELD_DEFINITIONS:
+            return None
+
+        if not self.organism_config or not self.organism_config.schema:
+            return None
+
+        metadata_schema = self.organism_config.schema.get("metadata", [])
+        for field_def in metadata_schema:
+            if field_def.get("name") == field:
+                return field_def.get("type")
+        return None
+
+    def _convert_param_value(self, value: Any, field: str) -> Any:
+        """Convert parameter value to the correct type based on field type."""
+        from datetime import date
+
+        field_type = self._get_field_type(field)
+
+        if field_type == "int":
+            return int(value) if value is not None else None
+        elif field_type == "float":
+            return float(value) if value is not None else None
+        elif field_type == "date":
+            # Convert date string (YYYY-MM-DD) to Python date object for asyncpg
+            if value is None:
+                return None
+            if isinstance(value, date):
+                return value
+            # Parse YYYY-MM-DD format
+            parts = str(value).split('-')
+            if len(parts) == 3:
+                return date(int(parts[0]), int(parts[1]), int(parts[2]))
+            return value
+        return value
 
     def _render_filter_condition(
         self,
@@ -213,17 +284,18 @@ class QueryBuilder:
         operator: str | None,
         params: dict[str, Any],
         param_prefix: str,
+        field: str = "",
     ) -> str:
         if isinstance(value, list):
             placeholders = []
             for idx, item in enumerate(value):
                 param_name = f"{param_prefix}_{idx}"
-                params[param_name] = item
+                params[param_name] = self._convert_param_value(item, field) if field else item
                 placeholders.append(f":{param_name}")
             return f"{expression} IN ({', '.join(placeholders)})"
 
         param_name = param_prefix
-        params[param_name] = value
+        params[param_name] = self._convert_param_value(value, field) if field else value
         op = operator or "="
         return f"{expression} {op} :{param_name}"
 

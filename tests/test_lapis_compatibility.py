@@ -491,6 +491,117 @@ class TestOrderBy:
         assert accessions1 != accessions2, "Random ordering returned same results twice"
 
 
+class TestRangeQueries:
+    """Test range query support for numeric and date fields"""
+
+    def test_int_range_both_bounds(self, config: TestConfig):
+        """Test integer range with both From and To"""
+        params = {"lengthFrom": "10000", "lengthTo": "11000"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/aggregated"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/aggregated"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()["data"]
+        querulus_data = querulus_resp.json()["data"]
+
+        assert compare_counts(lapis_data, querulus_data)
+
+    def test_int_range_only_from(self, config: TestConfig):
+        """Test integer range with only From (>=)"""
+        params = {"lengthFrom": "11000"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/aggregated"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/aggregated"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()["data"]
+        querulus_data = querulus_resp.json()["data"]
+
+        assert compare_counts(lapis_data, querulus_data)
+
+    def test_int_range_only_to(self, config: TestConfig):
+        """Test integer range with only To (<=)"""
+        params = {"lengthTo": "9000"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/aggregated"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/aggregated"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()["data"]
+        querulus_data = querulus_resp.json()["data"]
+
+        assert compare_counts(lapis_data, querulus_data)
+
+    def test_date_range_both_bounds(self, config: TestConfig):
+        """Test date range with both From and To"""
+        params = {"ncbiReleaseDateFrom": "2010-01-01", "ncbiReleaseDateTo": "2015-12-31"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/aggregated"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/aggregated"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()["data"]
+        querulus_data = querulus_resp.json()["data"]
+
+        assert compare_counts(lapis_data, querulus_data)
+
+    def test_date_range_only_from(self, config: TestConfig):
+        """Test date range with only From (>=)"""
+        params = {"ncbiReleaseDateFrom": "2020-01-01"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/aggregated"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/aggregated"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()["data"]
+        querulus_data = querulus_resp.json()["data"]
+
+        assert compare_counts(lapis_data, querulus_data)
+
+    def test_range_with_details_endpoint(self, config: TestConfig):
+        """Test that range queries work with details endpoint"""
+        params = {"lengthFrom": "10000", "lengthTo": "11000", "limit": "10"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/details"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/details"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()["data"]
+        querulus_data = querulus_resp.json()["data"]
+
+        # Both should return same number of results
+        assert len(lapis_data) == len(querulus_data)
+
+    def test_range_with_grouping(self, config: TestConfig):
+        """Test that range queries work with grouping"""
+        params = {"lengthFrom": "10000", "lengthTo": "11000", "fields": "geoLocCountry"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/aggregated"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/aggregated"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()["data"]
+        querulus_data = querulus_resp.json()["data"]
+
+        # Check that grouped counts match
+        assert compare_counts(lapis_data, querulus_data)
+
+
 class TestDataFormats:
     """Test different data format options (JSON, FASTA, TSV)"""
 

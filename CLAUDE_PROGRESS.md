@@ -76,13 +76,14 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
 - **Computed field filtering**: CTE-based approach for filtering by versionStatus, earliestReleaseDate
 - **Insertion endpoints**: Implemented nucleotide and amino acid insertions with LAPIS-compatible aggregation
 - **Data format support**: Added JSON format for sequences, TSV format for aggregated/details
-- All tests now passing (29/29)
+- **Range query support**: Full implementation of `{field}From` and `{field}To` parameters with automatic type casting
+- All tests now passing (36/36)
 
 ### Current Working State
 
 **Server Status**: Running on `localhost:8000`, connects to PostgreSQL at `localhost:5432/loculus`
 **Test Database**: 8,324 west-nile sequences
-**Test Suite**: 29/29 integration tests passing (100% success rate)
+**Test Suite**: 36/36 integration tests passing (100% success rate)
 
 ### Key Technical Details
 
@@ -119,30 +120,17 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
    - All formats tested and matching LAPIS exactly ✓
    - 6 new tests added to test suite (29/29 tests passing) ✓
 
-4. **Range query support** (PRIORITY FOR NEXT SESSION):
-   - LAPIS supports range filtering with `{field}From` and `{field}To` parameters
-   - Works for both date and numeric fields
-
-   **Date fields supporting ranges** (from config):
-   - ncbiReleaseDate, ncbiUpdateDate (+ segment variants)
-   - sampleCollectionDateRangeLower, sampleCollectionDateRangeUpper
-   - sampleReceivedDate, sequencingDate
-   - earliestReleaseDate (computed field)
-   - Format: YYYY-MM-DD
-
-   **Numeric fields supporting ranges** (from config):
-   - Integer fields: length, completeness, insdcVersion, breadthOfCoverage, depthOfCoverage
-   - Float fields: geoLocLatitude, geoLocLongitude, completeness
-   - Quality metrics: totalAmbiguousNucs, totalDeletedNucs, totalSnps, totalStopCodons, etc.
-
-   **Implementation plan:**
-   - Modify `QueryBuilder.add_filters_from_params()` to detect `From`/`To` suffixes
-   - Strip suffix to get base field name
-   - Look up field type in organism config schema
-   - Generate appropriate SQL: `field >= value` for From, `field <= value` for To
-   - Support BETWEEN when both From and To are present
-   - Test with: `ncbiReleaseDateFrom=2010-01-01&ncbiReleaseDateTo=2015-12-31` (returns 2,268 sequences)
-   - Test with numeric: `lengthFrom=10000&lengthTo=11000`
+4. ✅ **Range query support** (COMPLETED 2025-10-02):
+   - LAPIS-style range filtering with `{field}From` and `{field}To` parameters ✓
+   - Works for both date and numeric fields ✓
+   - Automatic type detection from organism config schema ✓
+   - Proper SQL casting for int, float, and date types ✓
+   - Parameter value conversion (strings → int/float/date objects) for asyncpg ✓
+   - Tested with dates: `ncbiReleaseDateFrom=2010-01-01&ncbiReleaseDateTo=2015-12-31` (2,268 matches) ✓
+   - Tested with integers: `lengthFrom=10000&lengthTo=11000` (4,589 matches) ✓
+   - Works with aggregated, details, and sequence endpoints ✓
+   - Works with grouping and filtering combinations ✓
+   - 7 new tests added to test suite (36/36 tests passing) ✓
 
 5. **Additional computed field improvements**:
    - Review LAPIS for any missing computed fields

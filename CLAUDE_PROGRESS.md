@@ -120,14 +120,29 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
    - 6 new tests added to test suite (29/29 tests passing) ✓
 
 4. **Range query support** (PRIORITY FOR NEXT SESSION):
-   - LAPIS supports date range filtering with `{field}From` and `{field}To` parameters
-   - Example: `ncbiReleaseDateFrom=2010-01-01&ncbiReleaseDateTo=2015-12-31`
+   - LAPIS supports range filtering with `{field}From` and `{field}To` parameters
+   - Works for both date and numeric fields
+
+   **Date fields supporting ranges** (from config):
+   - ncbiReleaseDate, ncbiUpdateDate (+ segment variants)
+   - sampleCollectionDateRangeLower, sampleCollectionDateRangeUpper
+   - sampleReceivedDate, sequencingDate
+   - earliestReleaseDate (computed field)
    - Format: YYYY-MM-DD
-   - Applies to date fields like: ncbiReleaseDate, sampleCollectionDate, submittedDate, releasedDate
-   - Implementation needed in QueryBuilder to handle `From`/`To` suffix parameters
-   - Should work on both metadata fields and computed fields
-   - Test: `curl "https://lapis-main.loculus.org/west-nile/sample/aggregated?ncbiReleaseDateFrom=2010-01-01&ncbiReleaseDateTo=2015-12-31"`
-   - Returns 2,268 sequences (verified working in LAPIS)
+
+   **Numeric fields supporting ranges** (from config):
+   - Integer fields: length, completeness, insdcVersion, breadthOfCoverage, depthOfCoverage
+   - Float fields: geoLocLatitude, geoLocLongitude, completeness
+   - Quality metrics: totalAmbiguousNucs, totalDeletedNucs, totalSnps, totalStopCodons, etc.
+
+   **Implementation plan:**
+   - Modify `QueryBuilder.add_filters_from_params()` to detect `From`/`To` suffixes
+   - Strip suffix to get base field name
+   - Look up field type in organism config schema
+   - Generate appropriate SQL: `field >= value` for From, `field <= value` for To
+   - Support BETWEEN when both From and To are present
+   - Test with: `ncbiReleaseDateFrom=2010-01-01&ncbiReleaseDateTo=2015-12-31` (returns 2,268 sequences)
+   - Test with numeric: `lengthFrom=10000&lengthTo=11000`
 
 5. **Additional computed field improvements**:
    - Review LAPIS for any missing computed fields

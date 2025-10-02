@@ -606,6 +606,131 @@ class QueryBuilder:
             offset=offset,
         )
 
+    def build_aligned_sequences_metadata_query(
+        self,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[str, dict[str, Any]]:
+        """Build query that returns accession, version, and full alignedNucleotideSequences JSONB for mutation calculation"""
+        params: dict[str, Any] = {"organism": self.organism}
+
+        # Separate simple and computed filters
+        simple_filters: list[tuple[str, Any]] = []
+        computed_filters: list[tuple[str, Any]] = []
+        for field, value in self.filters.items():
+            base_field, _ = self._resolve_filter_base(field)
+            if self._field_definition(base_field).requires_cte:
+                computed_filters.append((field, value))
+            else:
+                simple_filters.append((field, value))
+
+        if computed_filters:
+            # Need CTE for computed field filters
+            query = self._build_aligned_sequences_metadata_with_cte(
+                params, simple_filters, computed_filters, limit, offset
+            )
+        else:
+            # Simple query without CTE
+            query = self._build_aligned_sequences_metadata_simple(
+                params, simple_filters, limit, offset
+            )
+
+        return query, params
+
+    def _build_aligned_sequences_metadata_simple(
+        self,
+        params: dict[str, Any],
+        simple_filters: list[tuple[str, Any]],
+        limit: int | None,
+        offset: int,
+    ) -> str:
+        where_clauses = []
+        for field, value in simple_filters:
+            self._append_filter_clause(where_clauses, field=field, value=value, params=params, use_alias=False)
+
+        where_clause = ""
+        if where_clauses:
+            where_clause = " AND " + " AND ".join(where_clauses)
+
+        query = f"""
+            SELECT
+                accession,
+                version,
+                joint_metadata -> 'alignedNucleotideSequences' AS aligned_sequences,
+                joint_metadata -> 'alignedAminoAcidSequences' AS amino_acid_sequences
+            FROM {BASE_TABLE}
+            WHERE organism = :organism
+              AND released_at IS NOT NULL
+              {where_clause}
+            ORDER BY accession, version
+        """
+
+        if limit is not None:
+            query += f"\nLIMIT {limit}"
+        if offset > 0:
+            query += f"\nOFFSET {offset}"
+
+        return query
+
+    def _build_aligned_sequences_metadata_with_cte(
+        self,
+        params: dict[str, Any],
+        simple_filters: list[tuple[str, Any]],
+        computed_filters: list[tuple[str, Any]],
+        limit: int | None,
+        offset: int,
+    ) -> str:
+        # Build CTE with computed fields
+        cte_fields = ["accession", "version"]
+        for field, _ in computed_filters:
+            base_field, _ = self._resolve_filter_base(field)
+            if base_field not in cte_fields:
+                cte_fields.append(base_field)
+
+        joins = self._collect_join_requirements(cte_fields)
+        select_parts = [self._field_definition(field).select_sql(self) for field in cte_fields]
+        select_parts.append("joint_metadata -> 'alignedNucleotideSequences' AS aligned_sequences")
+        select_parts.append("joint_metadata -> 'alignedAminoAcidSequences' AS amino_acid_sequences")
+        select_clause = ",\n        ".join(select_parts)
+
+        cte_where: list[str] = []
+        outer_where: list[str] = []
+
+        for field, value in simple_filters:
+            self._append_filter_clause(cte_where, field=field, value=value, params=params, use_alias=False)
+
+        for field, value in computed_filters:
+            self._append_filter_clause(outer_where, field=field, value=value, params=params, use_alias=True)
+
+        query = (
+            "WITH computed_fields AS (\n"
+            "    SELECT\n"
+            f"        {select_clause}\n"
+            f"    FROM {BASE_TABLE}"
+        )
+        query += self._build_join_sql(joins, indent="        ")
+        query += (
+            "\n    WHERE organism = :organism"
+            "\n      AND released_at IS NOT NULL"
+        )
+        for clause in cte_where:
+            query += f"\n      AND {clause}"
+        query += "\n)\n"
+
+        query += 'SELECT "accession", "version", aligned_sequences, amino_acid_sequences\nFROM computed_fields'
+
+        if outer_where:
+            query += "\nWHERE " + " AND ".join(outer_where)
+
+        query += '\nORDER BY "accession", "version"'
+
+        if limit is not None:
+            query += f"\nLIMIT {limit}"
+        if offset > 0:
+            query += f"\nOFFSET {offset}"
+
+        return query
+
     def _build_sequence_query(
         self,
         *,

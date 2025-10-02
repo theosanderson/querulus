@@ -1122,6 +1122,203 @@ async def post_amino_acid_insertions(organism: str, body: dict = {}):
         }
 
 
+@app.get("/{organism}/sample/nucleotideMutations")
+async def get_nucleotide_mutations(
+    organism: str,
+    request: Request,
+):
+    """Get nucleotide mutations for matching sequences"""
+    # Validate organism
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+    # Build query using QueryBuilder for proper filter handling
+    builder = QueryBuilder(organism, organism_config)
+    query_params = dict(request.query_params)
+    builder.add_filters_from_params(query_params)
+
+    # Use the new aligned sequences metadata query
+    query_str, params = builder.build_aligned_sequences_metadata_query(limit=None, offset=0)
+
+    async for db in get_db():
+        result = await db.execute(text(query_str), params)
+        rows = result.fetchall()
+
+        # Calculate mutations for each sequence
+        all_mutations = []
+        compression = request.app.state.compression
+
+        for row in rows:
+            # Get nucleotide sequences
+            aligned_sequences = row.aligned_sequences or {}
+
+            for segment_name, seq_data in aligned_sequences.items():
+                if not seq_data or 'compressedSequence' not in seq_data:
+                    continue
+
+                # Decompress sequence
+                try:
+                    sequence = compression.decompress_nucleotide_sequence(
+                        seq_data['compressedSequence'],
+                        organism,
+                        segment_name
+                    )
+
+                    # Get reference sequence to compare
+                    reference_seq = organism_config.referenceGenome.get_nucleotide_sequence(segment_name)
+                    if not reference_seq:
+                        continue
+
+                    # Calculate mutations by comparing to reference
+                    for i, (ref_base, seq_base) in enumerate(zip(reference_seq, sequence)):
+                        if ref_base != seq_base and seq_base != 'N':  # Ignore N's (unknown)
+                            position = i + 1  # 1-indexed
+                            all_mutations.append({
+                                "mutation": f"{ref_base}{position}{seq_base}",
+                                "mutationFrom": ref_base,
+                                "mutationTo": seq_base,
+                                "position": position,
+                                "sequenceName": None,  # nucleotide mutations don't have sequence name
+                                "count": 1,
+                                "coverage": 1,
+                                "proportion": 1.0
+                            })
+
+                except Exception as e:
+                    logger.error(f"Error calculating mutations for {row.accession}.{row.version}: {e}")
+                    continue
+
+        return {
+            "data": all_mutations,
+            "info": {
+                "dataVersion": "0",
+                "requestId": str(uuid.uuid4()),
+                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
+                "queryInfo": "Nucleotide mutations query"
+            }
+        }
+
+
+@app.post("/{organism}/sample/nucleotideMutations")
+async def post_nucleotide_mutations(
+    organism: str,
+    request: Request,
+    body: dict = None,
+):
+    """POST version of nucleotide mutations endpoint"""
+    # Merge query params and body params
+    params_dict = dict(request.query_params)
+    if body:
+        params_dict.update(body)
+
+    # Build new request with combined params
+    class FakeRequest:
+        def __init__(self, params, app_state):
+            self.query_params = params
+            self.app = type('obj', (object,), {'state': app_state})()
+
+    fake_request = FakeRequest(params_dict, request.app.state)
+    return await get_nucleotide_mutations(organism, fake_request)
+
+
+@app.get("/{organism}/sample/aminoAcidMutations")
+async def get_amino_acid_mutations(
+    organism: str,
+    request: Request,
+):
+    """Get amino acid mutations for matching sequences"""
+    organism_config = config.backend_config.organisms.get(organism)
+    if not organism_config:
+        return JSONResponse(status_code=404, content={"error": f"Unknown organism: {organism}"})
+
+    # Get all query parameters except special ones
+    params_dict = dict(request.query_params)
+
+    # Build query to get sequences for the accession(s)
+    builder = QueryBuilder(organism, organism_config)
+    builder.add_filters_from_params(params_dict)
+
+    # Build query
+    query_parts, params = builder.build_select_query(
+        select_fields=["accession", "version"],
+        include_sequences=True
+    )
+    query_str = " ".join(query_parts)
+
+    async for db in get_db():
+        result = await db.execute(text(query_str), params)
+        rows = result.fetchall()
+
+        # Calculate mutations for each sequence
+        all_mutations = []
+        compression = request.app.state.compression
+
+        for row in rows:
+            # Get amino acid sequences
+            aa_sequences = row.amino_acid_sequences or {}
+
+            # Decompress all genes
+            decompressed_sequences = {}
+            for gene_name, seq_data in aa_sequences.items():
+                if not seq_data or 'compressedSequence' not in seq_data:
+                    continue
+
+                try:
+                    sequence = compression.decompress_amino_acid_sequence(
+                        seq_data['compressedSequence'],
+                        organism,
+                        gene_name
+                    )
+                    decompressed_sequences[gene_name] = sequence
+                except Exception as e:
+                    logger.error(f"Error decompressing {gene_name} for {row.accession}.{row.version}: {e}")
+                    continue
+
+            # Calculate mutations
+            try:
+                mutations = compression.calculate_amino_acid_mutations(
+                    decompressed_sequences, organism
+                )
+                all_mutations.extend(mutations)
+            except Exception as e:
+                logger.error(f"Error calculating mutations for {row.accession}.{row.version}: {e}")
+                continue
+
+        return {
+            "data": all_mutations,
+            "info": {
+                "dataVersion": "0",
+                "requestId": str(uuid.uuid4()),
+                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
+                "queryInfo": "Amino acid mutations query"
+            }
+        }
+
+
+@app.post("/{organism}/sample/aminoAcidMutations")
+async def post_amino_acid_mutations(
+    organism: str,
+    request: Request,
+    body: dict = None,
+):
+    """POST version of amino acid mutations endpoint"""
+    # Merge query params and body params
+    params_dict = dict(request.query_params)
+    if body:
+        params_dict.update(body)
+
+    # Build new request with combined params
+    class FakeRequest:
+        def __init__(self, params, app_state):
+            self.query_params = params
+            self.app = type('obj', (object,), {'state': app_state})()
+
+    fake_request = FakeRequest(params_dict, request.app.state)
+    return await get_amino_acid_mutations(organism, fake_request)
+
+
 if __name__ == "__main__":
     import uvicorn
 

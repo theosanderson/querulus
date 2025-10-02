@@ -77,13 +77,14 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
 - **Insertion endpoints**: Implemented nucleotide and amino acid insertions with LAPIS-compatible aggregation
 - **Data format support**: Added JSON format for sequences, TSV format for aggregated/details
 - **Range query support**: Full implementation of `{field}From` and `{field}To` parameters with automatic type casting
-- All tests now passing (36/36)
+- **POST sequence endpoints**: Added POST support for unalignedNucleotideSequences and alignedNucleotideSequences
+- All tests now passing (41/41)
 
 ### Current Working State
 
 **Server Status**: Running on `localhost:8000`, connects to PostgreSQL at `localhost:5432/loculus`
 **Test Database**: 8,324 west-nile sequences
-**Test Suite**: 36/36 integration tests passing (100% success rate)
+**Test Suite**: 41/41 integration tests passing (100% success rate)
 
 ### Key Technical Details
 
@@ -98,13 +99,32 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
 
 ### Immediate (Next Session) - Feature Parity
 
-1. ✅ **POST support for aggregated and details endpoints** (ALREADY IMPLEMENTED):
+1. **Mutation endpoints** (NEW PRIORITY):
+   - Research LAPIS mutation endpoint functionality
+   - Understand how nucleotide and amino acid mutations are queried
+   - Design approach for mutation filtering (may need sequence alignment parsing)
+   - Implement basic mutation endpoints:
+     - `GET/POST /{organism}/sample/nucleotideMutations`
+     - `GET/POST /{organism}/sample/aminoAcidMutations`
+   - Match LAPIS query syntax and response format
+   - Add integration tests comparing against LAPIS
+   - Note: This was originally scoped out in Phase 1 but is now a priority for feature parity
+
+2. ✅ **POST support for sequence endpoints** (COMPLETED 2025-10-02):
+   - `POST /{organism}/sample/unalignedNucleotideSequences` ✓
+   - `POST /{organism}/sample/alignedNucleotideSequences` ✓
+   - Accepts JSON body with query parameters (accessionVersion, dataFormat, etc.)
+   - Supports filtering via body parameters
+   - Returns sequences in FASTA or JSON format
+   - Test added: 41/41 tests passing ✓
+
+3. ✅ **POST support for aggregated and details endpoints** (ALREADY IMPLEMENTED):
    - `POST /{organism}/sample/aggregated` ✓
    - `POST /{organism}/sample/details` ✓
    - Accepts JSON body with query parameters
    - Supports versionStatus, isRevocation, fields, limit, offset, orderBy
 
-2. ✅ **Insertion endpoints** (COMPLETED 2025-10-02):
+4. ✅ **Insertion endpoints** (COMPLETED 2025-10-02):
    - `POST /{organism}/sample/nucleotideInsertions` ✓
    - `POST /{organism}/sample/aminoAcidInsertions` ✓
    - Parses insertions from JSONB metadata
@@ -112,7 +132,7 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
    - Matches LAPIS response format exactly
    - Tested: counts match LAPIS perfectly
 
-3. ✅ **Add data format support** (COMPLETED 2025-10-02):
+5. ✅ **Add data format support** (COMPLETED 2025-10-02):
    - `dataFormat` parameter for all sequence endpoints ✓
    - JSON format: Returns array of `{accessionVersion, segmentName}` objects ✓
    - TSV format: For aggregated/details endpoints with tab-separated values ✓
@@ -120,7 +140,7 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
    - All formats tested and matching LAPIS exactly ✓
    - 6 new tests added to test suite (29/29 tests passing) ✓
 
-4. ✅ **Range query support** (COMPLETED 2025-10-02):
+6. ✅ **Range query support** (COMPLETED 2025-10-02):
    - LAPIS-style range filtering with `{field}From` and `{field}To` parameters ✓
    - Works for both date and numeric fields ✓
    - Automatic type detection from organism config schema ✓
@@ -132,12 +152,12 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
    - Works with grouping and filtering combinations ✓
    - 7 new tests added to test suite (36/36 tests passing) ✓
 
-5. **Additional computed field improvements**:
+7. **Additional computed field improvements**:
    - Review LAPIS for any missing computed fields
    - Ensure all field names match exactly (case-sensitive)
    - Test edge cases (null values, missing data, etc.)
 
-6. **Query parameter validation**:
+8. **Query parameter validation**:
    - Validate that all query parameters are recognized/supported
    - Raise HTTP 400 error for unexpected/unknown parameters
    - Build allowlist of valid parameters per endpoint:
@@ -148,7 +168,7 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
    - Provide helpful error message listing valid parameters
    - Match LAPIS error response format
 
-7. **Error handling improvements**:
+9. **Error handling improvements**:
    - Better error messages for invalid parameter values
    - HTTP 400 for bad requests with clear error descriptions
    - HTTP 404 for invalid organisms

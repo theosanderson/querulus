@@ -858,6 +858,95 @@ class TestPostSequenceEndpoints:
         assert lapis_seq == querulus_seq, "Sequences should match exactly"
 
 
+def test_nucleotide_mutations_single_sample(config):
+    """Test nucleotide mutations for a single sample"""
+    accession = "LOC_000G9A7.1"
+
+    lapis_resp = requests.get(
+        config.lapis_endpoint(f"sample/nucleotideMutations?accessionVersion={accession}")
+    )
+    querulus_resp = requests.get(
+        config.querulus_endpoint(f"sample/nucleotideMutations?accessionVersion={accession}")
+    )
+
+    assert lapis_resp.status_code == 200
+    assert querulus_resp.status_code == 200
+
+    lapis_data = lapis_resp.json()
+    querulus_data = querulus_resp.json()
+
+    # Compare mutation data
+    lapis_mutations = lapis_data["data"]
+    querulus_mutations = querulus_data["data"]
+
+    # Should have same number of mutations
+    assert len(lapis_mutations) == len(querulus_mutations), \
+        f"Mutation count mismatch: LAPIS has {len(lapis_mutations)}, Querulus has {len(querulus_mutations)}"
+
+    # Convert to sets of mutation strings for comparison
+    lapis_mutation_set = {m["mutation"] for m in lapis_mutations}
+    querulus_mutation_set = {m["mutation"] for m in querulus_mutations}
+
+    assert lapis_mutation_set == querulus_mutation_set, \
+        f"Mutations don't match. LAPIS only: {lapis_mutation_set - querulus_mutation_set}, Querulus only: {querulus_mutation_set - lapis_mutation_set}"
+
+    # Check first mutation has all required fields
+    if lapis_mutations:
+        mutation = querulus_mutations[0]
+        assert "mutation" in mutation
+        assert "mutationFrom" in mutation
+        assert "mutationTo" in mutation
+        assert "position" in mutation
+        assert "count" in mutation
+        assert "coverage" in mutation
+        assert "proportion" in mutation
+
+
+def test_amino_acid_mutations_single_sample(config):
+    """Test amino acid mutations for a single sample"""
+    accession = "LOC_000G9A7.1"
+
+    lapis_resp = requests.get(
+        config.lapis_endpoint(f"sample/aminoAcidMutations?accessionVersion={accession}")
+    )
+    querulus_resp = requests.get(
+        config.querulus_endpoint(f"sample/aminoAcidMutations?accessionVersion={accession}")
+    )
+
+    assert lapis_resp.status_code == 200
+    assert querulus_resp.status_code == 200
+
+    lapis_data = lapis_resp.json()
+    querulus_data = querulus_resp.json()
+
+    # Compare mutation data
+    lapis_mutations = lapis_data["data"]
+    querulus_mutations = querulus_data["data"]
+
+    # Should have same number of mutations
+    assert len(lapis_mutations) == len(querulus_mutations), \
+        f"Mutation count mismatch: LAPIS has {len(lapis_mutations)}, Querulus has {len(querulus_mutations)}"
+
+    # Convert to sets of mutation strings for comparison
+    lapis_mutation_set = {m["mutation"] for m in lapis_mutations}
+    querulus_mutation_set = {m["mutation"] for m in querulus_mutations}
+
+    assert lapis_mutation_set == querulus_mutation_set, \
+        f"Mutations don't match. LAPIS only: {lapis_mutation_set - querulus_mutation_set}, Querulus only: {querulus_mutation_set - lapis_mutation_set}"
+
+    # Check first mutation has all required fields including sequenceName
+    if lapis_mutations:
+        mutation = querulus_mutations[0]
+        assert "mutation" in mutation
+        assert "mutationFrom" in mutation
+        assert "mutationTo" in mutation
+        assert "position" in mutation
+        assert "sequenceName" in mutation
+        assert "count" in mutation
+        assert "coverage" in mutation
+        assert "proportion" in mutation
+
+
 if __name__ == "__main__":
     # Run tests with pytest
     import sys

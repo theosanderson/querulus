@@ -1,5 +1,6 @@
 """Main FastAPI application"""
 
+import logging
 import uuid
 from contextlib import asynccontextmanager
 
@@ -12,6 +13,8 @@ from querulus.config import config
 from querulus.database import init_db, close_db, get_db, health_check
 from querulus.query_builder import QueryBuilder
 from querulus.compression import CompressionService
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager

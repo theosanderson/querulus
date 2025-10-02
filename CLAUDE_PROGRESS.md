@@ -29,8 +29,8 @@ This file tracks implementation progress for the Querulus project. It should be 
 ## Current Status
 
 **Date**: 2025-10-02
-**Phase**: MVP Development - Phase 1 COMPLETE + Testing Infrastructure
-**Working On**: All metadata endpoints working + Comprehensive test suite added
+**Phase**: Phase 2 - Sequence Endpoints IN PROGRESS
+**Working On**: Nucleotide sequence endpoint with decompression implemented
 
 ### Completed Tasks
 
@@ -117,18 +117,42 @@ This file tracks implementation progress for the Querulus project. It should be 
   - Regular metadata fields filter in CTE WHERE, computed fields filter in outer WHERE
   - Works for both aggregated and details endpoints
 
+#### Sequence Decompression & Endpoints ✅
+- ✅ **Config processing** (2025-10-02):
+  - Discovered config-processor that fetches reference genomes from URLs
+  - Processed config to replace `[[URL:...]]` placeholders with actual sequences
+  - Reference genome for west-nile is 11,041 bp
+
+- ✅ **Compression module** (querulus/compression.py):
+  - Implemented CompressionService mirroring Loculus backend logic
+  - Base64 decode → Zstd decompress with dictionary → UTF-8 decode
+  - Dictionary = reference genome sequence as bytes
+  - Pre-compiles Zstd dictionaries for each organism/segment
+  - Tested successfully: decompresses 11,029 bp sequences correctly
+
+- ✅ **Nucleotide sequences endpoint** (GET /{organism}/sample/alignedNucleotideSequences):
+  - Returns FASTA format (text/x-fasta)
+  - Supports filtering, limit, offset (same as details endpoint)
+  - Decompresses sequences on-the-fly using CompressionService
+  - FASTA headers: `>ACCESSION.VERSION`
+  - Initialized in app lifespan for reuse across requests
+
 ### Current Working State
 
-**Querulus is fully functional for metadata queries!** 🎉
+**Querulus now supports metadata AND sequence queries!** 🎉
 
 - Server running on `localhost:8000`
 - Successfully connects to PostgreSQL database
-- Both aggregated and details endpoints fully working
-- Returns accurate counts and metadata matching LAPIS exactly
-- Handles multi-version sequences correctly
-- All computed fields working (accessionVersion, timestamps, versionStatus, earliestReleaseDate)
-- Filtering by computed fields now fully supported
-- 17/17 integration tests passing
+- **Metadata endpoints**: aggregated and details fully working
+  - Returns accurate counts and metadata matching LAPIS exactly
+  - Handles multi-version sequences correctly
+  - All computed fields working (accessionVersion, timestamps, versionStatus, earliestReleaseDate)
+  - Filtering by computed fields fully supported
+  - 17/17 integration tests passing
+- **Sequence endpoints**: nucleotide sequences working
+  - Decompresses Zstandard-compressed sequences with dictionary compression
+  - Returns FASTA format
+  - Supports filtering and pagination
 
 ### Key Findings
 
@@ -165,37 +189,36 @@ This file tracks implementation progress for the Querulus project. It should be 
 
 ### Immediate (Next Session)
 
-**Phase 2: Sequence Endpoints**
+**Phase 2 Continued: Complete Sequence Endpoints**
 
-1. **Implement sequence decompression** (HIGH PRIORITY):
-   - Create `querulus/compression.py` module using zstandard library
-   - Load reference genome sequences from config as dictionaries
-   - Test decompression with sample sequences from database
-   - Handle Base64 decoding of compressed data
-   - Reference: `CompressionService.kt` in Loculus backend
+1. **Test and verify nucleotide sequences endpoint** (HIGH PRIORITY):
+   - Compare output against LAPIS for correctness
+   - Verify FASTA format matches exactly
+   - Test with various filters and pagination
+   - Add integration tests for sequences endpoint
+   - Check performance with larger datasets
 
-2. **Implement nucleotide sequence endpoint**:
-   - Create `GET /{organism}/sample/alignedNucleotideSequences/{segment}`
-   - Return sequences in FASTA format
-   - Support filtering (same as aggregated/details), limit, offset
-   - Implement FASTA header templating (from config)
-   - Stream responses for memory efficiency
-   - Test against LAPIS FASTA output
-
-3. **Implement amino acid sequence endpoint**:
+2. **Implement amino acid sequence endpoint**:
    - Create `GET /{organism}/sample/alignedAminoAcidSequences/{gene}`
-   - Similar to nucleotide endpoint but for genes
+   - Reuse compression service with gene dictionaries
    - FASTA format with appropriate headers
+   - Test against LAPIS
 
-4. **Implement insertion endpoints**:
+3. **Implement insertion endpoints**:
    - `GET /{organism}/sample/nucleotideInsertions`
    - `GET /{organism}/sample/aminoAcidInsertions`
+   - Parse insertions from JSONB metadata
    - Return list of insertions with positions and sequences
 
-5. **Add CSV/TSV output formats** (Nice to have):
-   - Support CSV and TSV output formats for aggregated/details
+4. **Optimize sequence streaming** (if needed):
+   - Profile memory usage during sequence decompression
+   - Consider streaming responses for very large result sets
+   - Batch decompression to avoid blocking
+
+5. **Add alternative output formats**:
+   - Support JSON format for sequences (not just FASTA)
+   - Support CSV/TSV for aggregated/details endpoints
    - Content negotiation based on Accept header or `format` parameter
-   - Streaming responses for large result sets
 
 ### Phase 1: MVP ✅ COMPLETE
 
@@ -294,8 +317,10 @@ LIMIT 5;
 
 ### Regenerating Config
 
+**IMPORTANT**: Config must be processed with config-processor to fetch reference genomes!
+
 ```bash
-# Generate querulus_config.json from helm template
+# Step 1: Generate querulus_config.json from helm template
 cd loculus/kubernetes
 helm template test-release loculus/ --set environment=server 2>&1 | python3 -c "
 import sys, json
@@ -307,7 +332,14 @@ lines = content[json_start:json_end].split('\n')
 cleaned = [line[4:] if line.startswith('    ') else line for line in lines]
 data = json.loads('\n'.join(cleaned).strip())
 print(json.dumps(data, indent=2))
-" > ../../config/querulus_config.json
+" > ../../config_unprocessed/querulus_config.json
+
+# Step 2: Process config to fetch reference genomes from URLs
+cd ../..
+python loculus/kubernetes/config-processor/config-processor.py config_unprocessed config
+
+# This replaces [[URL:...]] placeholders with actual sequence data
+# Without this step, decompression will fail!
 ```
 
 ### Testing Against LAPIS
@@ -382,10 +414,13 @@ Target SLOs (from PLAN.md):
 - Returns 8324 sequences (verified exact match with LAPIS)
 
 ### Key Files
-- `querulus/main.py` - FastAPI app with basic aggregated endpoint
+- `querulus/main.py` - FastAPI app with all endpoints (aggregated, details, sequences)
 - `querulus/config.py` - Configuration loading (backend config + reference genomes)
 - `querulus/database.py` - Async PostgreSQL connection pool
-- `config/querulus_config.json` - Generated from helm template (gitignored)
+- `querulus/query_builder.py` - SQL query builder for LAPIS parameter translation
+- `querulus/compression.py` - Zstandard decompression with dictionary support
+- `config/querulus_config.json` - Processed config with reference genomes (gitignored)
+- `config_unprocessed/querulus_config.json` - Raw config from helm template (with URL placeholders)
 
 ### Architecture
 - PLAN.md contains full architecture and implementation strategy
@@ -401,20 +436,26 @@ Target SLOs (from PLAN.md):
 ### What's Working ✅
 - ✅ Server starts successfully and loads config
 - ✅ Database connection pool initialized
+- ✅ Compression service initialized with reference genomes
 - ✅ Health checks working (/health, /ready)
-- ✅ Aggregated endpoint with full functionality:
+- ✅ **Aggregated endpoint** with full functionality:
   - Total counts
   - Field grouping (e.g., `?fields=geoLocCountry`, `?fields=earliestReleaseDate`)
   - Metadata filtering (e.g., `?geoLocCountry=USA`)
   - Pagination (limit, offset)
   - versionStatus grouping
   - earliestReleaseDate grouping
-- ✅ Details endpoint with full functionality:
+- ✅ **Details endpoint** with full functionality:
   - Field selection (e.g., `?fields=accession,lineage,versionStatus,earliestReleaseDate`)
   - Metadata filtering
   - Pagination
   - All computed fields from ReleasedDataModel.kt
-- ✅ Computed fields (ALL FIELDS):
+- ✅ **Nucleotide sequences endpoint** (GET /{organism}/sample/alignedNucleotideSequences):
+  - Returns FASTA format
+  - Decompresses sequences with Zstandard + dictionary
+  - Supports filtering and pagination
+  - FASTA headers: `>ACCESSION.VERSION`
+- ✅ **Computed fields** (ALL FIELDS):
   - accessionVersion (e.g., LOC_00004X1.1)
   - displayName
   - submittedDate/releasedDate (YYYY-MM-DD format)

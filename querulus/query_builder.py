@@ -84,8 +84,7 @@ class QueryBuilder:
         special_params = {
             "fields", "orderBy", "limit", "offset", "format",
             "downloadAsFile", "downloadFileBasename", "dataFormat",
-            "dataUseTerms", "dataUseTermsRestrictedUntil",
-            "versionStatus", "isRevocation"
+            "dataUseTerms", "dataUseTermsRestrictedUntil"
         }
         for key, value in params.items():
             if key not in special_params and value is not None:
@@ -665,9 +664,11 @@ class QueryBuilder:
         # Check if versionStatus or earliestReleaseDate is requested or filtered
         needs_version_status = (selected_fields and "versionStatus" in selected_fields) or "versionStatus" in self.filters
         needs_earliest_release = (selected_fields and "earliestReleaseDate" in selected_fields) or "earliestReleaseDate" in self.filters
+        needs_accession_version = (selected_fields and "accessionVersion" in selected_fields) or "accessionVersion" in self.filters
+        needs_display_name = (selected_fields and "displayName" in selected_fields) or "displayName" in self.filters
 
-        # If we need versionStatus or earliestReleaseDate (for selection or filtering), use CTE
-        needs_cte = needs_version_status or needs_earliest_release
+        # If we need versionStatus, earliestReleaseDate, accessionVersion, or displayName (for selection or filtering), use CTE
+        needs_cte = needs_version_status or needs_earliest_release or needs_accession_version or needs_display_name
 
         if needs_cte:
             # Determine all fields we need to compute (selected fields + filtered fields)

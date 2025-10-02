@@ -64,7 +64,17 @@ class QueryBuilder:
             operator = "="
             param_str = f":{param_name}"
 
-        if field in self.TABLE_COLUMN_FIELDS:
+        # Special handling for camelCase fields that map to snake_case database columns
+        camel_to_snake = {
+            "isRevocation": "is_revocation",
+            "submissionId": "submission_id",
+            "groupId": "group_id",
+            "versionComment": "version_comment",
+        }
+
+        if field in camel_to_snake:
+            return f"{camel_to_snake[field]} {operator} {param_str}"
+        elif field in self.TABLE_COLUMN_FIELDS:
             return f"{field} {operator} {param_str}"
         else:
             return f"joint_metadata -> 'metadata' ->> '{field}' {operator} {param_str}"
@@ -88,6 +98,9 @@ class QueryBuilder:
         }
         for key, value in params.items():
             if key not in special_params and value is not None:
+                # Convert boolean string values to actual booleans for isRevocation
+                if key == "isRevocation" and isinstance(value, str):
+                    value = value.lower() == "true"
                 self.filters[key] = value
         return self
 

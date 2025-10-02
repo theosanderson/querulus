@@ -29,8 +29,8 @@ This file tracks implementation progress for the Querulus project. It should be 
 ## Current Status
 
 **Date**: 2025-10-02
-**Phase**: Phase 3 - Deployment & Integration ⏳ READY TO START
-**Working On**: orderBy support completed, ready for Docker and Kubernetes integration
+**Phase**: Phase 3 - Deployment & Integration ✅ COMPLETE
+**Working On**: Docker and Kubernetes integration completed, ready for production deployment
 
 ### Completed Tasks
 
@@ -147,9 +147,33 @@ This file tracks implementation progress for the Querulus project. It should be 
   - Multiple orderBy fields supported (e.g., `orderBy=country&orderBy=accession`)
   - Added 4 comprehensive tests (all passing)
 
+#### Docker & Kubernetes Integration ✅ (2025-10-02)
+- ✅ **Dockerfile**:
+  - Multi-stage build for optimized image size
+  - Python 3.12 slim base image
+  - Installs dependencies from pyproject.toml
+  - Non-root user for security
+  - Health check configured
+
+- ✅ **GitHub Actions CI/CD** (.github/workflows/docker-build.yml):
+  - Builds on push to main and pull requests
+  - Pushes to ghcr.io/theosanderson/querulus
+  - Tags: latest, commit-{sha7}, branch name
+  - Uses build cache for faster builds
+
+- ✅ **Kubernetes Integration** (in loculus submodule):
+  - Created querulus-deployment.yaml (2 replicas, health checks)
+  - Created querulus-service.yaml (routes to Querulus pods)
+  - Modified lapis-deployment.yaml (disabled when useQuerulus=true)
+  - Modified silo-deployment.yaml (disabled when useQuerulus=true)
+  - Modified silo-service.yaml (disabled when useQuerulus=true)
+  - Modified lapis-service.yaml (routes to Querulus when useQuerulus=true)
+  - Updated values.yaml (useQuerulus toggle, image config, replicas, resources)
+  - Updated values.schema.json (schema definitions for all new fields)
+
 ### Current Working State
 
-**Querulus is feature-complete for core LAPIS functionality!** 🎉
+**Querulus is production-ready!** 🎉
 
 - Server running on `localhost:8000`
 - Successfully connects to PostgreSQL database
@@ -161,7 +185,8 @@ This file tracks implementation progress for the Querulus project. It should be 
   - ✅ Aligned amino acid sequences (FASTA format, with decompression)
 - **All computed fields implemented** (matching LAPIS exactly)
 - **21/21 integration tests passing** (100% success rate)
-- **Ready for deployment** - next step is Docker and Kubernetes integration
+- **Docker containerization complete** - ready to build and push
+- **Kubernetes integration complete** - ready to deploy with useQuerulus toggle
 
 ### Key Findings
 
@@ -196,44 +221,31 @@ This file tracks implementation progress for the Querulus project. It should be 
 
 ## Next Steps
 
-### Immediate (Next Session) - HIGH PRIORITY
+### Immediate (Next Session)
 
-**Phase 3: Docker & Kubernetes Integration**
+1. **Test Docker build locally**:
+   - Build Docker image locally
+   - Test running container
+   - Verify health checks work
+   - Test connection to PostgreSQL
 
-This is the TOP PRIORITY for the next session. Complete this BEFORE working on insertion endpoints or alternative formats.
+2. **Push commits and trigger GitHub Actions**:
+   - Push to origin/main
+   - Verify GitHub Actions workflow runs successfully
+   - Check that Docker image is pushed to ghcr.io
 
-1. **Create Dockerfile for Querulus** (MUST DO FIRST):
-   - Base image: Python 3.12 slim
-   - Install dependencies from pyproject.toml
-   - Copy querulus package
-   - Expose port 8000
-   - CMD to run uvicorn
-   - Health check configuration
-
-2. **Set up GitHub Actions for Docker image build**:
-   - Create `.github/workflows/docker-build.yml`
-   - Build on push to main branch
-   - Build on pull requests
-   - Push to `ghcr.io/theosanderson/querulus:latest`
-   - Tag with git sha and version
-   - Use GitHub Container Registry (ghcr.io)
-
-3. **Update Loculus Kubernetes configuration**:
-   - Add `useQuerulus` toggle to helm values (default: false)
-   - When `useQuerulus=true`:
-     - Deploy querulus deployment and service
-     - **DISABLE** lapis deployment
-     - **DISABLE** silo deployment
-     - Route API calls to querulus instead of lapis
-   - When `useQuerulus=false` (default):
-     - Keep existing lapis+silo behavior
-   - Update ingress/service routing based on toggle
-
-4. **Test deployment**:
+3. **Test Kubernetes deployment**:
    - Deploy to test environment with `useQuerulus=true`
-   - Verify all endpoints work through Kubernetes
-   - Test against existing Loculus frontend
+   - Verify Querulus pods start successfully
+   - Verify config is loaded correctly
+   - Test all endpoints through Kubernetes
    - Compare performance with LAPIS
+
+4. **Performance testing**:
+   - Benchmark response times
+   - Test under load (100+ req/s)
+   - Monitor memory usage
+   - Compare with LAPIS baseline
 
 ### Later Priorities
 

@@ -29,295 +29,119 @@ This file tracks implementation progress for the Querulus project. It should be 
 ## Current Status
 
 **Date**: 2025-10-02
-**Phase**: Phase 3 - Deployment & Integration ✅ COMPLETE
-**Working On**: Docker and Kubernetes integration completed, ready for production deployment
+**Phase**: Feature Parity with LAPIS
+**Working On**: Expanding Querulus to match more LAPIS features (POST endpoints, insertions, etc.)
 
-### Completed Tasks
+### Completed Tasks (Summary)
 
-#### Planning & Architecture ✅
-- ✅ Analyzed LAPIS API specification
-- ✅ Examined Loculus database schema
-- ✅ Studied LAPIS source code and architecture
-- ✅ Connected to PostgreSQL database and explored schema
-- ✅ Analyzed sequence compression implementation (Zstandard with dictionary compression)
-- ✅ Created comprehensive PLAN.md with full architecture and implementation strategy
-- ✅ Analyzed get-released-data endpoint to understand computed fields
+#### ✅ Core Implementation Complete
+- **Planning & Architecture**: Full analysis of LAPIS, database schema, compression algorithm
+- **Project Setup**: Python + FastAPI + async PostgreSQL with pyproject.toml
+- **Configuration**: Kubernetes ConfigMap, config loader with reference genome processing
+- **Health Checks**: `/health` and `/ready` endpoints with database connection verification
 
-#### Initial Implementation ✅
-- ✅ Set up Python project structure with pyproject.toml
-- ✅ Created configuration loading module (config.py)
-- ✅ Created Kubernetes ConfigMap template (querulus-config.yaml)
-- ✅ Generated querulus_config.json from helm template
-- ✅ Implemented async PostgreSQL connection pool (database.py)
-- ✅ Created FastAPI application with lifespan management (main.py)
-- ✅ Implemented health check endpoints (/health, /ready)
+#### ✅ API Endpoints (All Working)
+- **GET Aggregated** (`/{organism}/sample/aggregated`): Grouping, filtering, pagination, orderBy
+- **GET Details** (`/{organism}/sample/details`): Field selection, filtering, pagination, orderBy
+- **GET Sequences** (aligned/unaligned nucleotide, amino acid): FASTA format, decompression, filtering
+- All endpoints support metadata filtering, computed field filtering, and sorting
 
-#### Core Endpoints ✅
-- ✅ **Aggregated endpoint with full functionality:**
-  - Field grouping (e.g., `?fields=geoLocCountry`)
-  - Metadata filtering (e.g., `?geoLocCountry=USA`)
-  - Pagination (limit, offset)
-  - versionStatus support (LATEST_VERSION, REVISED, REVOKED)
-  - CTE-based approach for window functions in GROUP BY
+#### ✅ Computed Fields (Complete)
+All fields from LAPIS `ReleasedDataModel.kt` implemented:
+- Version fields: accessionVersion, displayName, versionStatus (LATEST_VERSION/REVISED/REVOKED)
+- Timestamps: submittedDate, releasedDate, submittedAtTimestamp, releasedAtTimestamp, earliestReleaseDate
+- Metadata: submissionId, submitter, groupId, groupName (with JOIN), isRevocation, versionComment
+- Data use: dataUseTerms (OPEN/RESTRICTED), dataUseTermsRestrictedUntil, dataUseTermsUrl
 
-- ✅ **Details endpoint with full functionality:**
-  - Field selection (e.g., `?fields=accession,geoLocCountry,lineage`)
-  - Metadata filtering
-  - Pagination (limit, offset)
-  - Computed fields (accessionVersion, displayName, timestamps, versionStatus)
+#### ✅ Advanced Features
+- **Window Functions**: versionStatus and earliestReleaseDate use SQL window functions
+- **CTE Support**: Computed fields in CTEs for filtering in outer queries
+- **Sequence Decompression**: Zstandard with dictionary compression (reference genome)
+- **orderBy**: Supports metadata fields, computed fields, random, and count
+- **Multi-version handling**: Correctly tracks version history across accessions
 
-- ✅ **Computed fields implementation (ALL fields from ReleasedDataModel.kt):**
-  - accessionVersion: `accession.version` format
-  - displayName: same as accessionVersion
-  - submittedDate/releasedDate: formatted dates (YYYY-MM-DD)
-  - submittedAtTimestamp/releasedAtTimestamp: Unix timestamps
-  - versionStatus: dynamically computed using window functions
-  - earliestReleaseDate: minimum of release_at, external date fields (ncbiReleaseDate), and previous versions
-  - submissionId, submitter, groupId: directly from database columns
-  - isRevocation, versionComment: directly from database columns
-  - groupName: JOIN to groups_table
-  - dataUseTerms: computed from data_use_terms_table (OPEN/RESTRICTED based on restriction date)
-  - dataUseTermsRestrictedUntil: restriction date if currently restricted
-  - dataUseTermsUrl: config-driven URLs based on OPEN/RESTRICTED status
+#### ✅ Testing & Verification
+- **23/23 integration tests passing** (100% success rate)
+- All responses match LAPIS exactly (counts, fields, computed values)
+- Test suite: `python -m pytest tests/test_lapis_compatibility.py -v`
 
-- ✅ **versionStatus computation:**
-  - LATEST_VERSION: highest version for an accession
-  - REVISED: not latest, no revocation exists
-  - REVOKED: not latest, higher version is a revocation
-  - Uses MAX(version) OVER (PARTITION BY accession)
-  - Works in both details and aggregated endpoints
+#### ✅ Docker & Kubernetes
+- Dockerfile with multi-stage build (Python 3.12 slim)
+- GitHub Actions CI/CD (builds and pushes to ghcr.io)
+- Kubernetes manifests in loculus submodule (deployment, service, ingress)
+- `useQuerulus` toggle to switch from LAPIS to Querulus
 
-- ✅ **earliestReleaseDate computation:**
-  - Computes earliest of: released_at, external fields (from config), previous versions
-  - Uses window function: MIN(...) OVER (PARTITION BY accession ORDER BY version)
-  - Config-driven: reads externalFields from organism config (e.g., ncbiReleaseDate)
-  - Works in both details and aggregated endpoints via CTE
-  - Correctly inherits earliest date across all versions of same accession
-
-#### Testing & Verification ✅
-- ✅ All endpoints tested against live LAPIS
-- ✅ Exact match on counts, grouping, and computed fields
-- ✅ Tested with multi-version sequences (LOC_000LUQJ v1 + v2)
-- ✅ versionStatus correctly shows REVISED for old versions
-- ✅ earliestReleaseDate tested: exact match with LAPIS (444 sequences for 2014-06-30)
-- ✅ All computed fields tested and matching LAPIS:
-  - submissionId, submitter, groupId, isRevocation, versionComment
-  - groupName (with JOIN to groups_table)
-  - dataUseTerms, dataUseTermsRestrictedUntil, dataUseTermsUrl
-- ✅ **Comprehensive test suite** (tests/test_lapis_compatibility.py):
-  - 21 integration tests comparing Querulus vs LAPIS
-  - All tests passing (100% success rate)
-  - Tests cover: aggregated, details, computed fields, filtering, pagination, orderBy, sequences
-  - Can be run with: `python -m pytest tests/test_lapis_compatibility.py -v`
-
-#### Bug Fixes ✅
-- ✅ **Computed field filtering support** (2025-10-02):
-  - Fixed filtering by versionStatus, earliestReleaseDate, and other computed fields
-  - Uses CTE approach: compute fields in inner query, filter in outer query
-  - Regular metadata fields filter in CTE WHERE, computed fields filter in outer WHERE
-  - Works for both aggregated and details endpoints
-
-#### Sequence Decompression & Endpoints ✅
-- ✅ **Config processing** (2025-10-02):
-  - Discovered config-processor that fetches reference genomes from URLs
-  - Processed config to replace `[[URL:...]]` placeholders with actual sequences
-  - Reference genome for west-nile is 11,041 bp
-
-- ✅ **Compression module** (querulus/compression.py):
-  - Implemented CompressionService mirroring Loculus backend logic
-  - Base64 decode → Zstd decompress with dictionary → UTF-8 decode
-  - Dictionary = reference genome sequence as bytes
-  - Pre-compiles Zstd dictionaries for each organism/segment
-  - Tested successfully: decompresses 11,029 bp sequences correctly
-
-- ✅ **All sequence endpoints** (2025-10-02):
-  - `GET /{organism}/sample/alignedNucleotideSequences` - Aligned nucleotide sequences (FASTA)
-  - `GET /{organism}/sample/unalignedNucleotideSequences` - Unaligned nucleotide sequences (FASTA)
-  - `GET /{organism}/sample/alignedAminoAcidSequences/{gene}` - Amino acid sequences (FASTA)
-  - All support filtering, limit, offset, orderBy
-  - FASTA headers: `>ACCESSION.VERSION`
-  - Decompresses on-the-fly using CompressionService
-
-#### Query Features ✅
-- ✅ **orderBy support** (2025-10-02):
-  - Implemented orderBy parameter for all endpoints (aggregated, details, sequences)
-  - Supports metadata fields (e.g., `orderBy=geoLocCountry`)
-  - Supports computed fields (e.g., `orderBy=accession`, `orderBy=versionStatus`)
-  - Special values: `orderBy=random`, `orderBy=count` (aggregated only)
-  - Multiple orderBy fields supported (e.g., `orderBy=country&orderBy=accession`)
-  - Added 4 comprehensive tests (all passing)
-
-#### Docker & Kubernetes Integration ✅ (2025-10-02)
-- ✅ **Kubernetes configuration fixed**:
-  - Removed organism loop from querulus-deployment.yaml and querulus-service.yaml
-  - Single stateless deployment `loculus-querulus` handles all organisms
-  - Created dedicated querulus-ingress.yaml (no prefix stripping needed)
-  - Disabled lapis-service.yaml and lapis-ingress.yaml when useQuerulus=true
-  - Updated database env vars to use `database` secret (same as backend)
-  - Scaled to 1 replica
-  - Added DB_URL support with JDBC to asyncpg conversion
-
-- ✅ **Health endpoint improvements**:
-  - Added debug logging for database connection failures
-  - health_check() returns (is_healthy, error_message) tuple
-  - Errors logged to help debug Kubernetes deployment issues
-  - Added test_health.py with tests for /health and /ready endpoints
-
-#### Docker & Kubernetes Integration (original) ✅ (2025-10-02)
-- ✅ **Dockerfile**:
-  - Multi-stage build for optimized image size
-  - Python 3.12 slim base image
-  - Installs dependencies from pyproject.toml
-  - Non-root user for security
-  - Health check configured
-
-- ✅ **GitHub Actions CI/CD** (.github/workflows/docker-build.yml):
-  - Builds on push to main and pull requests
-  - Pushes to ghcr.io/theosanderson/querulus
-  - Tags: latest, commit-{sha7}, branch name
-  - Uses build cache for faster builds
-
-- ✅ **Kubernetes Integration** (in loculus submodule):
-  - Created querulus-deployment.yaml (2 replicas, health checks)
-  - Created querulus-service.yaml (routes to Querulus pods)
-  - Modified lapis-deployment.yaml (disabled when useQuerulus=true)
-  - Modified silo-deployment.yaml (disabled when useQuerulus=true)
-  - Modified silo-service.yaml (disabled when useQuerulus=true)
-  - Modified lapis-service.yaml (routes to Querulus when useQuerulus=true)
-  - Updated values.yaml (useQuerulus toggle, image config, replicas, resources)
-  - Updated values.schema.json (schema definitions for all new fields)
+#### ✅ Recent Bug Fixes (2025-10-02)
+- **versionStatus filter bug**: Removed from `special_params` - now filters work correctly
+- **Computed field filtering**: CTE-based approach for filtering by versionStatus, earliestReleaseDate
+- All tests now passing (23/23)
 
 ### Current Working State
 
-**Querulus is production-ready!** 🎉
+**Server Status**: Running on `localhost:8000`, connects to PostgreSQL at `localhost:5432/loculus`
+**Test Database**: 8,324 west-nile sequences
+**Test Suite**: 23/23 integration tests passing (100% success rate)
 
-- Server running on `localhost:8000`
-- Successfully connects to PostgreSQL database
-- **All core endpoints implemented and tested:**
-  - ✅ Aggregated endpoint (with grouping, filtering, orderBy)
-  - ✅ Details endpoint (with field selection, filtering, orderBy)
-  - ✅ Aligned nucleotide sequences (FASTA format, with decompression)
-  - ✅ Unaligned nucleotide sequences (FASTA format, with decompression)
-  - ✅ Aligned amino acid sequences (FASTA format, with decompression)
-- **All computed fields implemented** (matching LAPIS exactly)
-- **21/21 integration tests passing** (100% success rate)
-- **Docker containerization complete** - ready to build and push
-- **Kubernetes integration complete** - ready to deploy with useQuerulus toggle
+### Key Technical Details
 
-### Key Findings
-
-1. **Database Schema**:
-   - Primary table: `sequence_entries_view` (joins entries + preprocessed data + external metadata)
-   - All metadata stored in JSONB: `joint_metadata -> 'metadata' ->> 'fieldName'`
-   - Sequences stored as Base64-encoded Zstandard-compressed data
-   - 8,324 west-nile sequences in test database
-
-2. **Compression Algorithm**:
-   - Uses Zstandard (zstd) level 3 compression
-   - **Dictionary compression** using reference genome sequences
-   - Defined in `CompressionService.kt` in Loculus backend
-   - Provides 50-70% better compression than standard zstd
-
-3. **API Endpoints to Implement**:
-   - `/sample/aggregated` - Count/group sequences by metadata
-   - `/sample/details` - Get metadata for sequences
-   - `/sample/alignedNucleotideSequences/{segment}` - Get nucleotide sequences
-   - `/sample/alignedAminoAcidSequences/{gene}` - Get amino acid sequences
-   - `/sample/nucleotideInsertions` - List nucleotide insertions
-   - `/sample/aminoAcidInsertions` - List amino acid insertions
-   - **Skipping**: Mutation-based filtering (Phase 1)
-
-4. **Technology Stack Decision**:
-   - **Python + FastAPI** for rapid development
-   - asyncpg/SQLAlchemy for PostgreSQL
-   - zstandard library for decompression
-   - Can optimize hot paths later if needed
+- **Database**: `sequence_entries_view` table with JSONB metadata at `joint_metadata -> 'metadata'`
+- **Compression**: Zstandard level 3 with dictionary (reference genome), base64-encoded
+- **Stack**: Python 3.12 + FastAPI + asyncpg + zstandard
+- **Deployment**: Docker + Kubernetes with `useQuerulus` toggle
 
 ---
 
 ## Next Steps
 
-### Immediate (Next Session)
+### Immediate (Next Session) - Feature Parity
 
-**CRITICAL: Add POST support for aggregated and details endpoints**
-1. **Add POST endpoints**:
-   - POST /{organism}/sample/aggregated
-   - POST /{organism}/sample/details
+1. **Add POST support for aggregated and details endpoints**:
+   - `POST /{organism}/sample/aggregated`
+   - `POST /{organism}/sample/details`
    - Accept JSON body with same parameters as query strings
-   - Support versionStatus, isRevocation, fields, limit, offset, orderBy
+   - Support all fields: versionStatus, isRevocation, fields, limit, offset, orderBy, etc.
    - Ignore mutation/insertion arrays for now (not implemented)
+   - Add tests to verify POST endpoints match GET endpoint behavior
 
-2. **Fix database connection in Kubernetes**:
-   - ✅ Simplified config.py to use DB_URL, DB_USERNAME, DB_PASSWORD (no prefix)
-   - ✅ Added logging to show connection details in /ready endpoint
-   - Test that pods connect to database service correctly
-
-3. **Test Docker build locally**:
-   - Build Docker image locally
-   - Test running container
-   - Verify health checks work
-   - Test connection to PostgreSQL
-
-4. **Push commits and trigger GitHub Actions**:
-   - Push to origin/main
-   - Verify GitHub Actions workflow runs successfully
-   - Check that Docker image is pushed to ghcr.io
-
-5. **Test Kubernetes deployment**:
-   - Deploy to test environment with `useQuerulus=true`
-   - Verify Querulus pods start successfully
-   - Verify config is loaded correctly
-   - Test all endpoints through Kubernetes
-   - Compare performance with LAPIS
-
-6. **Performance testing**:
-   - Benchmark response times
-   - Test under load (100+ req/s)
-   - Monitor memory usage
-   - Compare with LAPIS baseline
-
-### Later Priorities
-
-**Additional Features** (after Docker/Kubernetes integration complete):
-
-1. **Implement insertion endpoints**:
+2. **Implement insertion endpoints**:
    - `GET /{organism}/sample/nucleotideInsertions`
    - `GET /{organism}/sample/aminoAcidInsertions`
    - Parse insertions from JSONB metadata
    - Return list of insertions with positions and sequences
+   - Match LAPIS response format exactly
 
-2. **Add alternative output formats**:
-   - Support JSON format for sequences (not just FASTA)
-   - Support CSV/TSV for aggregated/details endpoints
-   - Content negotiation based on Accept header or `format` parameter
+3. **Add data format support**:
+   - Support `dataFormat` parameter for sequences endpoints
+   - Options: `FASTA` (current default), `JSON`
+   - JSON format should return array of objects with accession, version, sequence
+   - Support TSV format for aggregated/details endpoints
+   - Content negotiation based on `dataFormat` parameter or Accept header
+   - Test all formats against LAPIS
 
-3. **Optimize sequence streaming** (if needed):
+4. **Additional computed field improvements**:
+   - Review LAPIS for any missing computed fields
+   - Ensure all field names match exactly (case-sensitive)
+   - Test edge cases (null values, missing data, etc.)
+
+5. **Error handling improvements**:
+   - Better error messages for invalid parameters
+   - HTTP 400 for bad requests with clear error descriptions
+   - HTTP 404 for invalid organisms
+   - Match LAPIS error response format
+
+### Later Priorities
+
+1. **Optimize sequence streaming** (if needed):
    - Profile memory usage during sequence decompression
    - Consider streaming responses for very large result sets
    - Batch decompression to avoid blocking
 
-### Phase 1: MVP ✅ COMPLETE
+3. **Performance testing**:
+   - Benchmark response times against LAPIS
+   - Test under load (100+ req/s)
+   - Monitor memory usage
+   - Add query caching if needed
 
-- ✅ QueryBuilder class for translating LAPIS params to SQL
-- ✅ `/sample/aggregated` with field grouping (country, lineage, etc.)
-- ✅ Metadata filtering (WHERE clauses on JSONB fields + computed fields)
-- ✅ `/sample/details` endpoint with field selection
-- ✅ Integration tests comparing against live LAPIS (17 tests, 100% passing)
-- ✅ Response formatting (JSON)
-- ✅ All computed fields (accessionVersion, timestamps, versionStatus, earliestReleaseDate, etc.)
-- ✅ Multi-version sequence handling
-- ✅ Filtering by computed fields (versionStatus, earliestReleaseDate)
-
-### Phase 2: Sequences (Weeks 3-4)
-
-- [ ] Sequence decompression with dictionary
-- [ ] `/sample/alignedNucleotideSequences/main` (FASTA)
-- [ ] `/sample/alignedAminoAcidSequences/{gene}` (FASTA)
-- [ ] FASTA header template parsing
-- [ ] Streaming responses for large datasets
-- [ ] Memory optimization
-
-### Phase 3+: See PLAN.md
 
 ---
 
@@ -485,72 +309,34 @@ Target SLOs (from PLAN.md):
 ## Notes for Next Claude
 
 ### Quick Start
-- **Server is already implemented and working!** Run: `python -m querulus.main`
-- Basic aggregated endpoint working: `curl http://localhost:8000/west-nile/sample/aggregated`
-- Returns 8324 sequences (verified exact match with LAPIS)
+```bash
+# Start server
+python -m uvicorn querulus.main:app --host 0.0.0.0 --port 8000
+
+# Run tests
+python -m pytest tests/test_lapis_compatibility.py -v
+
+# Test endpoint
+curl http://localhost:8000/west-nile/sample/aggregated
+```
 
 ### Key Files
-- `querulus/main.py` - FastAPI app with all endpoints (aggregated, details, sequences)
-- `querulus/config.py` - Configuration loading (backend config + reference genomes)
-- `querulus/database.py` - Async PostgreSQL connection pool
-- `querulus/query_builder.py` - SQL query builder for LAPIS parameter translation
-- `querulus/compression.py` - Zstandard decompression with dictionary support
-- `config/querulus_config.json` - Processed config with reference genomes (gitignored)
-- `config_unprocessed/querulus_config.json` - Raw config from helm template (with URL placeholders)
+- `querulus/main.py` - FastAPI app with all endpoints
+- `querulus/query_builder.py` - SQL query builder (handles filtering, CTE generation)
+- `querulus/compression.py` - Zstandard decompression with dictionary
+- `querulus/config.py` - Config loader (backend config + reference genomes)
+- `tests/test_lapis_compatibility.py` - 23 integration tests (all passing)
 
-### Architecture
-- PLAN.md contains full architecture and implementation strategy
-- Database schema is well-documented in PLAN.md Appendix A
-- Compression algorithm is Zstandard with dictionary compression (reference genome as dict)
-- Focus on MVP: aggregated + details endpoints first, sequences later
+### Important Context
+- **All core GET endpoints working**: aggregated, details, sequences (nucleotide & amino acid)
+- **All computed fields implemented**: versionStatus, earliestReleaseDate, timestamps, etc.
+- **Test database**: localhost:5432/loculus (user: postgres, password: unsecure), 8,324 sequences
+- **LAPIS reference**: https://lapis-main.loculus.org/west-nile/
+- See PLAN.md for full architecture details
 
-### Environment
-- Test database: localhost:5432, database=loculus, user=postgres, password=unsecure
-- Live LAPIS for testing: https://lapis-main.loculus.org/west-nile/
-- Config generated from: `loculus/kubernetes/loculus/templates/querulus-config.yaml`
-
-### What's Working ✅
-- ✅ Server starts successfully and loads config
-- ✅ Database connection pool initialized
-- ✅ Compression service initialized with reference genomes
-- ✅ Health checks working (/health, /ready)
-- ✅ **Aggregated endpoint** with full functionality:
-  - Total counts
-  - Field grouping (e.g., `?fields=geoLocCountry`, `?fields=earliestReleaseDate`)
-  - Metadata filtering (e.g., `?geoLocCountry=USA`)
-  - Pagination (limit, offset)
-  - versionStatus grouping
-  - earliestReleaseDate grouping
-- ✅ **Details endpoint** with full functionality:
-  - Field selection (e.g., `?fields=accession,lineage,versionStatus,earliestReleaseDate`)
-  - Metadata filtering
-  - Pagination
-  - All computed fields from ReleasedDataModel.kt
-- ✅ **Nucleotide sequences endpoint** (GET /{organism}/sample/alignedNucleotideSequences):
-  - Returns FASTA format
-  - Decompresses sequences with Zstandard + dictionary
-  - Supports filtering and pagination
-  - FASTA headers: `>ACCESSION.VERSION`
-- ✅ **Computed fields** (ALL FIELDS):
-  - accessionVersion (e.g., LOC_00004X1.1)
-  - displayName
-  - submittedDate/releasedDate (YYYY-MM-DD format)
-  - submittedAtTimestamp/releasedAtTimestamp (Unix timestamps)
-  - versionStatus (LATEST_VERSION, REVISED, REVOKED)
-  - earliestReleaseDate (config-driven, inherits across versions)
-  - submissionId, submitter, groupId, groupName
-  - isRevocation, versionComment
-  - dataUseTerms, dataUseTermsRestrictedUntil, dataUseTermsUrl
-- ✅ Database JOINs:
-  - groups_table for groupName
-  - data_use_terms_table for dataUseTerms fields
-- ✅ Multi-version sequence handling
-- ✅ All results match LAPIS exactly
-
-### What's Next 🚀
-- ⏳ **Docker containerization** (TOP PRIORITY)
-- ⏳ **GitHub Actions CI/CD** (build and push Docker image)
-- ⏳ **Kubernetes integration** (useQuerulus toggle in Loculus helm chart)
-- ⏳ **Production deployment testing**
-- 📋 Insertion endpoints (nucleotideInsertions, aminoAcidInsertions) - AFTER deployment
-- 📋 Alternative output formats (CSV, TSV, JSON for sequences) - AFTER deployment
+### What Needs Work
+Focus on feature parity:
+1. POST endpoints for aggregated/details
+2. Insertion endpoints (nucleotideInsertions, aminoAcidInsertions)
+3. JSON format support for sequences (currently only FASTA)
+4. Error handling improvements

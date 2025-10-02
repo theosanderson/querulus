@@ -223,6 +223,12 @@ This file tracks implementation progress for the Querulus project. It should be 
 
 ### Immediate (Next Session)
 
+**CRITICAL FIX FIRST:**
+- Remove the `range` loop from querulus-deployment.yaml and querulus-service.yaml
+- Querulus is a single stateless deployment that handles ALL organisms, not one per organism like LAPIS/SILO
+- Should be a single deployment named `loculus-querulus` (no organism suffix)
+- Update lapis-service.yaml to route to the single querulus service (not per-organism)
+
 1. **Test Docker build locally**:
    - Build Docker image locally
    - Test running container

@@ -1275,23 +1275,19 @@ async def get_amino_acid_mutations(
     request: Request,
 ):
     """Get amino acid mutations for matching sequences"""
-    organism_config = config.backend_config.organisms.get(organism)
-    if not organism_config:
-        return JSONResponse(status_code=404, content={"error": f"Unknown organism: {organism}"})
+    # Validate organism
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
 
-    # Get all query parameters except special ones
-    params_dict = dict(request.query_params)
-
-    # Build query to get sequences for the accession(s)
+    # Build query using QueryBuilder for proper filter handling
     builder = QueryBuilder(organism, organism_config)
-    builder.add_filters_from_params(params_dict)
+    query_params = dict(request.query_params)
+    builder.add_filters_from_params(query_params)
 
-    # Build query
-    query_parts, params = builder.build_select_query(
-        select_fields=["accession", "version"],
-        include_sequences=True
-    )
-    query_str = " ".join(query_parts)
+    # Use the new aligned sequences metadata query
+    query_str, params = builder.build_aligned_sequences_metadata_query(limit=None, offset=0)
 
     async for db in get_db():
         result = await db.execute(text(query_str), params)
@@ -1305,32 +1301,40 @@ async def get_amino_acid_mutations(
             # Get amino acid sequences
             aa_sequences = row.amino_acid_sequences or {}
 
-            # Decompress all genes
-            decompressed_sequences = {}
             for gene_name, seq_data in aa_sequences.items():
                 if not seq_data or 'compressedSequence' not in seq_data:
                     continue
 
+                # Decompress sequence
                 try:
                     sequence = compression.decompress_amino_acid_sequence(
                         seq_data['compressedSequence'],
                         organism,
                         gene_name
                     )
-                    decompressed_sequences[gene_name] = sequence
-                except Exception as e:
-                    logger.error(f"Error decompressing {gene_name} for {row.accession}.{row.version}: {e}")
-                    continue
 
-            # Calculate mutations
-            try:
-                mutations = compression.calculate_amino_acid_mutations(
-                    decompressed_sequences, organism
-                )
-                all_mutations.extend(mutations)
-            except Exception as e:
-                logger.error(f"Error calculating mutations for {row.accession}.{row.version}: {e}")
-                continue
+                    # Get reference sequence to compare
+                    reference_seq = organism_config.referenceGenome.get_gene_sequence(gene_name)
+                    if not reference_seq:
+                        continue
+
+                    # Calculate mutations by comparing to reference
+                    for i, (ref_aa, seq_aa) in enumerate(zip(reference_seq, sequence)):
+                        if ref_aa != seq_aa and seq_aa != 'X':  # Ignore X's (unknown)
+                            mutation_str = f"{gene_name}:{ref_aa}{i+1}{seq_aa}"
+                            all_mutations.append({
+                                "mutation": mutation_str,
+                                "mutationFrom": ref_aa,
+                                "mutationTo": seq_aa,
+                                "position": i + 1,
+                                "count": 1,
+                                "coverage": 1,
+                                "proportion": 1.0,
+                                "sequenceName": gene_name
+                            })
+                except Exception as e:
+                    logger.error(f"Error processing {gene_name} for {row.accession}.{row.version}: {e}")
+                    continue
 
         return {
             "data": all_mutations,
@@ -1347,7 +1351,7 @@ async def get_amino_acid_mutations(
 async def post_amino_acid_mutations(
     organism: str,
     request: Request,
-    body: dict = None,
+    body: dict = Body({}),
 ):
     """POST version of amino acid mutations endpoint"""
     # Merge query params and body params

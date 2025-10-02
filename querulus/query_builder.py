@@ -81,9 +81,16 @@ class QueryBuilder:
         Filters are any parameters that aren't special LAPIS parameters like
         'fields', 'orderBy', 'limit', 'offset', etc.
         """
-        special_params = {"fields", "orderBy", "limit", "offset", "format", "downloadAsFile"}
+        special_params = {
+            "fields", "orderBy", "limit", "offset", "format",
+            "downloadAsFile", "downloadFileBasename", "dataFormat",
+            "dataUseTerms", "dataUseTermsRestrictedUntil"
+        }
         for key, value in params.items():
             if key not in special_params and value is not None:
+                # Convert string booleans to actual booleans for isRevocation
+                if key == "isRevocation" and isinstance(value, str):
+                    value = value.lower() == "true"
                 self.filters[key] = value
         return self
 

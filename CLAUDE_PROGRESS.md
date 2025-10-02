@@ -119,12 +119,22 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
    - All formats tested and matching LAPIS exactly ✓
    - 6 new tests added to test suite (29/29 tests passing) ✓
 
-4. **Additional computed field improvements**:
+4. **Range query support** (PRIORITY FOR NEXT SESSION):
+   - LAPIS supports date range filtering with `{field}From` and `{field}To` parameters
+   - Example: `ncbiReleaseDateFrom=2010-01-01&ncbiReleaseDateTo=2015-12-31`
+   - Format: YYYY-MM-DD
+   - Applies to date fields like: ncbiReleaseDate, sampleCollectionDate, submittedDate, releasedDate
+   - Implementation needed in QueryBuilder to handle `From`/`To` suffix parameters
+   - Should work on both metadata fields and computed fields
+   - Test: `curl "https://lapis-main.loculus.org/west-nile/sample/aggregated?ncbiReleaseDateFrom=2010-01-01&ncbiReleaseDateTo=2015-12-31"`
+   - Returns 2,268 sequences (verified working in LAPIS)
+
+5. **Additional computed field improvements**:
    - Review LAPIS for any missing computed fields
    - Ensure all field names match exactly (case-sensitive)
    - Test edge cases (null values, missing data, etc.)
 
-5. **Error handling improvements**:
+6. **Error handling improvements**:
    - Better error messages for invalid parameters
    - HTTP 400 for bad requests with clear error descriptions
    - HTTP 404 for invalid organisms

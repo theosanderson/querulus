@@ -32,9 +32,21 @@ class QueryBuilder:
 
         Returns appropriate SQL based on whether field is a table column or JSONB field.
         Handles both scalar values (=) and list values (IN).
+        Handles timestamp range filters (From/To suffixes).
 
         For list values, creates individual parameters and adds them to params_dict.
         """
+        # Handle timestamp range filters
+        if field.endswith("From") or field.endswith("To"):
+            base_field = field[:-4]  # Remove From/To suffix
+            operator = ">=" if field.endswith("From") else "<="
+
+            # Map to SQL expression
+            if base_field == "releasedAtTimestamp":
+                return f"EXTRACT(EPOCH FROM released_at)::bigint {operator} :{param_name}"
+            elif base_field == "submittedAtTimestamp":
+                return f"EXTRACT(EPOCH FROM submitted_at)::bigint {operator} :{param_name}"
+
         # Determine if we're using IN or = based on value type
         is_list = isinstance(value, list) if value is not None else False
 

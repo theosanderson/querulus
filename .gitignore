@@ -33,9 +33,9 @@ htmlcov/
 config/querulus_config.json
 config_unprocessed/
 
-# Debug and test scripts
+# Debug and test scripts (root level only, not tests/ directory)
 debug_*.py
-test_*.py
+/test_*.py
 
 # Logs
 *.log

@@ -1051,49 +1051,190 @@ async def post_nucleotide_insertions(organism: str, body: dict = {}):
                 filter_params[k] = v
     builder.add_filters_from_params(filter_params)
 
-    # Build query to get insertions
-    # We need to expand the insertions array and count occurrences
+    # Use query builder to build a filtered CTE, then expand insertions
+    # This ensures computed fields like accessionVersion work correctly
+    from querulus.query_builder import FIELD_DEFINITIONS
+
+    # Separate simple and computed filters
+    simple_filters = []
+    computed_filters = []
+    for field, value in builder.filters.items():
+        base_field = field.rstrip("From").rstrip("To")
+        if base_field in FIELD_DEFINITIONS and FIELD_DEFINITIONS[base_field].requires_cte:
+            computed_filters.append((field, value))
+        else:
+            simple_filters.append((field, value))
+
     params = {"organism": organism}
 
-    # Build WHERE clause for filters
-    where_clauses = []
-    for field, value in builder.filters.items():
-        param_name = f"filter_{field}"
-        where_clauses.append(f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}")
-        params[param_name] = value
+    if computed_filters:
+        # Need CTE for computed field filtering
+        # First, build CTE with computed fields
+        filter_base_fields = [field.rstrip("From").rstrip("To") for field, _ in computed_filters]
+        from querulus.query_builder import BASE_TABLE
 
-    where_clause = ""
-    if where_clauses:
-        where_clause = " AND " + " AND ".join(where_clauses)
+        select_parts = []
+        for field in filter_base_fields:
+            if field in FIELD_DEFINITIONS:
+                select_parts.append(FIELD_DEFINITIONS[field].select_sql(builder))
 
-    # Query to aggregate insertions
-    # The insertions are stored as {"main": ["position:sequence", ...]}
-    query_str = f"""
-        WITH insertions_data AS (
+        select_parts.append("joint_metadata -> 'nucleotideInsertions' as insertions_all_segments")
+        select_clause = ",\n            ".join(select_parts)
+
+        # Build WHERE clauses for CTE (simple filters only)
+        cte_where_clauses = []
+        for field, value in simple_filters:
+            param_name = f"filter_{field.replace('.', '_')}"
+            base_field = field.rstrip("From").rstrip("To")
+
+            # Use query builder to get the field expression
+            field_def = builder._field_definition(base_field)
+            filter_expr = field_def.filter_sql(builder)
+
+            # Determine operator
+            if field.endswith("From"):
+                op = ">="
+            elif field.endswith("To"):
+                op = "<="
+            else:
+                op = "="
+
+            cte_where_clauses.append(f"{filter_expr} {op} :{param_name}")
+            params[param_name] = builder._convert_param_value(value, base_field)
+
+        cte_where = ""
+        if cte_where_clauses:
+            cte_where = " AND " + " AND ".join(cte_where_clauses)
+
+        # Build WHERE clauses for outer query (computed filters)
+        outer_where_clauses = []
+        for field, value in computed_filters:
+            base_field = field.rstrip("From").rstrip("To")
+            param_name = f"filter_{field.replace('.', '_')}"
+
+            # Determine operator
+            if field.endswith("From"):
+                op = ">="
+            elif field.endswith("To"):
+                op = "<="
+            else:
+                op = "="
+
+            outer_where_clauses.append(f'"{base_field}" {op} :{param_name}')
+            params[param_name] = value
+
+        outer_where = ""
+        if outer_where_clauses:
+            outer_where = "WHERE " + " AND ".join(outer_where_clauses)
+
+        query_str = f"""
+            WITH filtered_sequences AS (
+                SELECT
+                    {select_clause}
+                FROM {BASE_TABLE}
+                WHERE organism = :organism
+                  AND released_at IS NOT NULL
+                  AND joint_metadata -> 'nucleotideInsertions' IS NOT NULL
+                  {cte_where}
+            ),
+            filtered_with_computed AS (
+                SELECT insertions_all_segments
+                FROM filtered_sequences
+                {outer_where}
+            ),
+            segments_expanded AS (
+                SELECT
+                    segment_name,
+                    insertions_array
+                FROM filtered_with_computed,
+                LATERAL jsonb_each(insertions_all_segments) AS segments(segment_name, insertions_array)
+            ),
+            insertions_data AS (
+                SELECT
+                    segment_name,
+                    jsonb_array_elements_text(insertions_array) as insertion_str
+                FROM segments_expanded
+            ),
+            parsed_insertions AS (
+                SELECT
+                    segment_name,
+                    split_part(insertion_str, ':', 1)::int as position,
+                    split_part(insertion_str, ':', 2) as inserted_symbols
+                FROM insertions_data
+            )
             SELECT
-                jsonb_array_elements_text(joint_metadata -> 'nucleotideInsertions' -> 'main') as insertion_str
-            FROM sequence_entries_view
-            WHERE organism = :organism
-              AND released_at IS NOT NULL
-              AND joint_metadata -> 'nucleotideInsertions' -> 'main' IS NOT NULL
-              {where_clause}
-        ),
-        parsed_insertions AS (
+                'ins_' || segment_name || ':' || position || ':' || inserted_symbols as insertion,
+                COUNT(*) as count,
+                inserted_symbols,
+                position,
+                segment_name as sequence_name
+            FROM parsed_insertions
+            GROUP BY segment_name, position, inserted_symbols
+            ORDER BY count DESC, position ASC
+        """
+    else:
+        # Simple query without CTE for computed fields
+        where_clauses = []
+        for field, value in simple_filters:
+            param_name = f"filter_{field.replace('.', '_')}"
+            base_field = field.rstrip("From").rstrip("To")
+
+            # Use query builder to get the field expression
+            field_def = builder._field_definition(base_field)
+            filter_expr = field_def.filter_sql(builder)
+
+            # Determine operator
+            if field.endswith("From"):
+                op = ">="
+            elif field.endswith("To"):
+                op = "<="
+            else:
+                op = "="
+
+            where_clauses.append(f"{filter_expr} {op} :{param_name}")
+            params[param_name] = builder._convert_param_value(value, base_field)
+
+        where_clause = ""
+        if where_clauses:
+            where_clause = " AND " + " AND ".join(where_clauses)
+
+        # Query to aggregate insertions from all segments
+        # The insertions are stored as {"segment_name": ["position:sequence", ...], ...}
+        query_str = f"""
+            WITH segments_expanded AS (
+                SELECT
+                    segment_name,
+                    insertions_array
+                FROM sequence_entries_view,
+                LATERAL jsonb_each(joint_metadata -> 'nucleotideInsertions') AS segments(segment_name, insertions_array)
+                WHERE organism = :organism
+                  AND released_at IS NOT NULL
+                  AND joint_metadata -> 'nucleotideInsertions' IS NOT NULL
+                  {where_clause}
+            ),
+            insertions_data AS (
+                SELECT
+                    segment_name,
+                    jsonb_array_elements_text(insertions_array) as insertion_str
+                FROM segments_expanded
+            ),
+            parsed_insertions AS (
+                SELECT
+                    segment_name,
+                    split_part(insertion_str, ':', 1)::int as position,
+                    split_part(insertion_str, ':', 2) as inserted_symbols
+                FROM insertions_data
+            )
             SELECT
-                split_part(insertion_str, ':', 1)::int as position,
-                split_part(insertion_str, ':', 2) as inserted_symbols
-            FROM insertions_data
-        )
-        SELECT
-            'ins_' || position || ':' || inserted_symbols as insertion,
-            COUNT(*) as count,
-            inserted_symbols,
-            position,
-            NULL::text as sequence_name
-        FROM parsed_insertions
-        GROUP BY position, inserted_symbols
-        ORDER BY count DESC, position ASC
-    """
+                'ins_' || segment_name || ':' || position || ':' || inserted_symbols as insertion,
+                COUNT(*) as count,
+                inserted_symbols,
+                position,
+                segment_name as sequence_name
+            FROM parsed_insertions
+            GROUP BY segment_name, position, inserted_symbols
+            ORDER BY count DESC, position ASC
+        """
 
     async for db in get_db():
         result = await db.execute(text(query_str), params)

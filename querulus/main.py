@@ -893,6 +893,7 @@ async def post_amino_acid_insertions(organism: str, body: dict = {}):
     """
     organism_config = validate_organism_or_404(organism)
 
+    # Build query to get all insertions from matching sequences
     builder = QueryBuilder(organism, organism_config)
 
     # Add filters from body (excluding special fields)
@@ -909,47 +910,159 @@ async def post_amino_acid_insertions(organism: str, body: dict = {}):
                 filter_params[k] = v
     builder.add_filters_from_params(filter_params)
 
-    params = {"organism": organism}
+    # Use query builder to build a filtered CTE, then expand insertions
+    from querulus.query_builder import FIELD_DEFINITIONS, BASE_TABLE
 
-    # Build WHERE clause for filters (preserve original behavior)
-    where_clauses = []
+    # Separate simple and computed filters
+    simple_filters: List[Tuple[str, Any]] = []
+    computed_filters: List[Tuple[str, Any]] = []
     for field, value in builder.filters.items():
-        param_name = f"filter_{field}"
-        where_clauses.append(f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}")
-        params[param_name] = value
+        base_field = field.rstrip("From").rstrip("To")
+        if base_field in FIELD_DEFINITIONS and FIELD_DEFINITIONS[base_field].requires_cte:
+            computed_filters.append((field, value))
+        else:
+            simple_filters.append((field, value))
 
-    where_clause = f" AND {' AND '.join(where_clauses)}" if where_clauses else ""
+    params: Dict[str, Any] = {"organism": organism}
 
-    query_str = f"""
-        WITH gene_insertions AS (
+    if computed_filters:
+        # Need CTE for computed field filtering
+        filter_base_fields = [field.rstrip("From").rstrip("To") for field, _ in computed_filters]
+
+        select_parts = []
+        for field in filter_base_fields:
+            if field in FIELD_DEFINITIONS:
+                select_parts.append(FIELD_DEFINITIONS[field].select_sql(builder))
+        select_parts.append("joint_metadata -> 'aminoAcidInsertions' as insertions_all_genes")
+        select_clause = ",\n            ".join(select_parts)
+
+        # WHERE for CTE (simple filters only)
+        cte_where_clauses = []
+        for field, value in simple_filters:
+            param_name = f"filter_{field.replace('.', '_')}"
+            base_field = field.rstrip("From").rstrip("To")
+            field_def = builder._field_definition(base_field)
+            filter_expr = field_def.filter_sql(builder)
+
+            if field.endswith("From"):
+                op = ">="
+            elif field.endswith("To"):
+                op = "<="
+            else:
+                op = "="
+
+            cte_where_clauses.append(f"{filter_expr} {op} :{param_name}")
+            params[param_name] = builder._convert_param_value(value, base_field)
+
+        cte_where = f" AND {' AND '.join(cte_where_clauses)}" if cte_where_clauses else ""
+
+        # WHERE for outer query (computed filters)
+        outer_where_clauses = []
+        for field, value in computed_filters:
+            base_field = field.rstrip("From").rstrip("To")
+            param_name = f"filter_{field.replace('.', '_')}"
+            if field.endswith("From"):
+                op = ">="
+            elif field.endswith("To"):
+                op = "<="
+            else:
+                op = "="
+            outer_where_clauses.append(f"{base_field} {op} :{param_name}")
+            params[param_name] = builder._convert_param_value(value, base_field)
+
+        outer_where = f"WHERE {' AND '.join(outer_where_clauses)}" if outer_where_clauses else ""
+
+        query_str = f"""
+            WITH filtered_sequences AS (
+                SELECT
+                    {select_clause}
+                FROM {BASE_TABLE}
+                WHERE organism = :organism
+                  AND released_at IS NOT NULL
+                  AND joint_metadata -> 'aminoAcidInsertions' IS NOT NULL
+                  {cte_where}
+            ),
+            filtered_with_computed AS (
+                SELECT insertions_all_genes
+                FROM filtered_sequences
+                {outer_where}
+            ),
+            gene_insertions AS (
+                SELECT
+                    gene_key as gene,
+                    jsonb_array_elements_text(gene_insertions) as insertion_str
+                FROM filtered_with_computed,
+                     LATERAL jsonb_each(insertions_all_genes) as genes(gene_key, gene_insertions)
+                WHERE jsonb_typeof(gene_insertions) = 'array'
+            ),
+            parsed_insertions AS (
+                SELECT
+                    gene,
+                    split_part(insertion_str, ':', 1)::int as position,
+                    split_part(insertion_str, ':', 2) as inserted_symbols
+                FROM gene_insertions
+            )
             SELECT
-                gene_key as gene,
-                jsonb_array_elements_text(gene_insertions) as insertion_str
-            FROM sequence_entries_view,
-                 LATERAL jsonb_each(joint_metadata -> 'aminoAcidInsertions') as genes(gene_key, gene_insertions)
-            WHERE organism = :organism
-              AND released_at IS NOT NULL
-              AND joint_metadata -> 'aminoAcidInsertions' IS NOT NULL
-              AND jsonb_typeof(gene_insertions) = 'array'
-              {where_clause}
-        ),
-        parsed_insertions AS (
+                'ins_' || gene || ':' || position || ':' || inserted_symbols as insertion,
+                COUNT(*) as count,
+                inserted_symbols,
+                position,
+                gene as sequence_name
+            FROM parsed_insertions
+            GROUP BY gene, position, inserted_symbols
+            ORDER BY count DESC, gene ASC, position ASC
+        """
+    else:
+        # No computed filters, use simpler query
+        where_clauses = []
+        for field, value in simple_filters:
+            param_name = f"filter_{field.replace('.', '_')}"
+            base_field = field.rstrip("From").rstrip("To")
+            field_def = builder._field_definition(base_field)
+            filter_expr = field_def.filter_sql(builder)
+
+            if field.endswith("From"):
+                op = ">="
+            elif field.endswith("To"):
+                op = "<="
+            else:
+                op = "="
+
+            where_clauses.append(f"{filter_expr} {op} :{param_name}")
+            params[param_name] = builder._convert_param_value(value, base_field)
+
+        where_clause = f" AND {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        query_str = f"""
+            WITH gene_insertions AS (
+                SELECT
+                    gene_key as gene,
+                    jsonb_array_elements_text(gene_insertions) as insertion_str
+                FROM sequence_entries_view,
+                     LATERAL jsonb_each(joint_metadata -> 'aminoAcidInsertions') as genes(gene_key, gene_insertions)
+                WHERE organism = :organism
+                  AND released_at IS NOT NULL
+                  AND joint_metadata -> 'aminoAcidInsertions' IS NOT NULL
+                  AND jsonb_typeof(gene_insertions) = 'array'
+                  {where_clause}
+            ),
+            parsed_insertions AS (
+                SELECT
+                    gene,
+                    split_part(insertion_str, ':', 1)::int as position,
+                    split_part(insertion_str, ':', 2) as inserted_symbols
+                FROM gene_insertions
+            )
             SELECT
-                gene,
-                split_part(insertion_str, ':', 1)::int as position,
-                split_part(insertion_str, ':', 2) as inserted_symbols
-            FROM gene_insertions
-        )
-        SELECT
-            'ins_' || gene || ':' || position || ':' || inserted_symbols as insertion,
-            COUNT(*) as count,
-            inserted_symbols,
-            position,
-            gene as sequence_name
-        FROM parsed_insertions
-        GROUP BY gene, position, inserted_symbols
-        ORDER BY count DESC, gene ASC, position ASC
-    """
+                'ins_' || gene || ':' || position || ':' || inserted_symbols as insertion,
+                COUNT(*) as count,
+                inserted_symbols,
+                position,
+                gene as sequence_name
+            FROM parsed_insertions
+            GROUP BY gene, position, inserted_symbols
+            ORDER BY count DESC, gene ASC, position ASC
+        """
 
     rows = await execute_and_fetch(query_str, params)
     data = [

@@ -1297,8 +1297,7 @@ class TestPostSequenceEndpoints:
 
         assert lapis_set == querulus_set, "Insertion data doesn't match"
 
-    # TODO: Re-enable - aminoAcidInsertions not being returned (LAPIS=1, Querulus=0)
-    def _test_post_amino_acid_insertions_specific_accession(self):
+    def test_post_amino_acid_insertions_specific_accession(self):
         """Test POST aminoAcidInsertions with specific accessionVersion for cchf"""
         config = TestConfig(
             organism="cchf"

@@ -26,16 +26,36 @@ class QueryBuilder:
         self.group_by_fields: list[str] = []
         self.order_by_fields: list[str] = []
 
-    def _get_filter_clause(self, field: str, param_name: str) -> str:
+    def _get_filter_clause(self, field: str, param_name: str, value: Any = None, params_dict: dict = None) -> str:
         """
         Get SQL filter clause for a field.
 
         Returns appropriate SQL based on whether field is a table column or JSONB field.
+        Handles both scalar values (=) and list values (IN).
+
+        For list values, creates individual parameters and adds them to params_dict.
         """
-        if field in self.TABLE_COLUMN_FIELDS:
-            return f"{field} = :{param_name}"
+        # Determine if we're using IN or = based on value type
+        is_list = isinstance(value, list) if value is not None else False
+
+        if is_list:
+            # Create individual parameters for each list item
+            param_placeholders = []
+            for i, item in enumerate(value):
+                item_param_name = f"{param_name}_{i}"
+                param_placeholders.append(f":{item_param_name}")
+                if params_dict is not None:
+                    params_dict[item_param_name] = item
+            param_str = f"({', '.join(param_placeholders)})"
+            operator = "IN"
         else:
-            return f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+            operator = "="
+            param_str = f":{param_name}"
+
+        if field in self.TABLE_COLUMN_FIELDS:
+            return f"{field} {operator} {param_str}"
+        else:
+            return f"joint_metadata -> 'metadata' ->> '{field}' {operator} {param_str}"
 
     def add_filter(self, field: str, value: Any) -> "QueryBuilder":
         """Add a metadata filter"""
@@ -333,8 +353,9 @@ class QueryBuilder:
                     for field, value in self.filters.items():
                         if field not in computed_fields:
                             param_name = f"filter_{field}"
-                            query += f"\n          AND {self._get_filter_clause(field, param_name)}"
-                            params[param_name] = value
+                            query += f"\n          AND {self._get_filter_clause(field, param_name, value, params)}"
+                            if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
+                                params[param_name] = value
 
                 query += f"""
                     )
@@ -439,8 +460,9 @@ class QueryBuilder:
                     for field, value in self.filters.items():
                         if field not in computed_fields:
                             param_name = f"filter_{field}"
-                            query += f"\n          AND {self._get_filter_clause(field, param_name)}"
-                            params[param_name] = value
+                            query += f"\n          AND {self._get_filter_clause(field, param_name, value, params)}"
+                            if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
+                                params[param_name] = value
 
                 query += """
                     )
@@ -476,8 +498,9 @@ class QueryBuilder:
         if self.filters and not filters_already_applied:
             for field, value in self.filters.items():
                 param_name = f"filter_{field}"
-                query += f"\n  AND {self._get_filter_clause(field, param_name)}"
-                params[param_name] = value
+                query += f"\n  AND {self._get_filter_clause(field, param_name, value, params)}"
+                if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
+                    params[param_name] = value
 
         # Add GROUP BY if needed
         if query_needs_groupby:
@@ -853,8 +876,9 @@ class QueryBuilder:
         if self.filters:
             for field, value in self.filters.items():
                 param_name = f"filter_{field}"
-                query += f"\n  AND {self._get_filter_clause(field, param_name)}"
-                params[param_name] = value
+                query += f"\n  AND {self._get_filter_clause(field, param_name, value, params)}"
+                if not isinstance(value, list):  # Only add scalar values; lists already added in _get_filter_clause
+                    params[param_name] = value
 
         # Add pagination
         query += f"\nORDER BY {self.build_order_by_clause('details')}"

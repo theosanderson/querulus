@@ -104,7 +104,6 @@ class QueryBuilder:
         special_params = {
             "fields", "orderBy", "limit", "offset", "format",
             "downloadAsFile", "downloadFileBasename", "dataFormat",
-            "dataUseTerms", "dataUseTermsRestrictedUntil", "versionStatus"
         }
         for key, value in params.items():
             if key not in special_params and value is not None:

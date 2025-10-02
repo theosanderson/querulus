@@ -296,6 +296,12 @@ async def get_details(
     async for db in get_db():
         # Build and execute query
         query_str, params = builder.build_details_query(selected_fields, limit, offset)
+        # Debug logging
+        if "versionStatus" in query_params:
+            print(f"\n=== DEBUG: Details query with versionStatus filter ===")
+            print(f"Query:\n{query_str}")
+            print(f"Params: {params}")
+            print("=" * 60)
         result = await db.execute(text(query_str), params)
 
         # Format results

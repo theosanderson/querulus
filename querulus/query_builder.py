@@ -295,9 +295,15 @@ class QueryBuilder:
                 if self.filters:
                     for field, value in self.filters.items():
                         if field not in computed_fields:
-                            param_name = f"filter_{field}"
-                            query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
-                            params[param_name] = value
+                            # Special case for is_revocation - it's a table column, not JSONB
+                            if field == "is_revocation":
+                                param_name = f"filter_{field}"
+                                query += f"\n          AND is_revocation = :{param_name}"
+                                params[param_name] = value
+                            else:
+                                param_name = f"filter_{field}"
+                                query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                                params[param_name] = value
 
                 query += f"""
                     )
@@ -390,7 +396,11 @@ class QueryBuilder:
                     for field, value in self.filters.items():
                         if field not in computed_fields:
                             param_name = f"filter_{field}"
-                            query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                            # Special case for is_revocation - it's a table column, not JSONB
+                            if field == "is_revocation":
+                                query += f"\n          AND is_revocation = :{param_name}"
+                            else:
+                                query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
                             params[param_name] = value
 
                 query += """
@@ -427,7 +437,11 @@ class QueryBuilder:
         if self.filters and not filters_already_applied:
             for field, value in self.filters.items():
                 param_name = f"filter_{field}"
-                query += f"\n  AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                # Special case for is_revocation - it's a table column, not JSONB
+                if field == "is_revocation":
+                    query += f"\n  AND is_revocation = :{param_name}"
+                else:
+                    query += f"\n  AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
                 params[param_name] = value
 
         # Add GROUP BY if needed
@@ -691,9 +705,12 @@ class QueryBuilder:
             if self.filters:
                 for field, value in self.filters.items():
                     if field not in computed_fields:
-                        # Regular metadata field - filter in CTE
                         param_name = f"filter_{field}"
-                        query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                        # Special case for is_revocation - it's a table column, not JSONB
+                        if field == "is_revocation":
+                            query += f"\n          AND is_revocation = :{param_name}"
+                        else:
+                            query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
                         params[param_name] = value
 
             # Close the CTE and select from it
@@ -805,7 +822,11 @@ class QueryBuilder:
         if self.filters:
             for field, value in self.filters.items():
                 param_name = f"filter_{field}"
-                query += f"\n  AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                # Special case for is_revocation - it's a table column, not JSONB
+                if field == "is_revocation":
+                    query += f"\n  AND is_revocation = :{param_name}"
+                else:
+                    query += f"\n  AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
                 params[param_name] = value
 
         # Add pagination

@@ -206,9 +206,10 @@ async def post_aggregated(organism: str, body: dict = {}):
         if k not in ["fields", "limit", "offset", "orderBy",
                     "nucleotideMutations", "aminoAcidMutations",
                     "nucleotideInsertions", "aminoAcidInsertions"]:
-            # Convert isRevocation -> is_revocation
+            # Convert isRevocation -> is_revocation and string to boolean
             if k == "isRevocation":
-                filter_params["is_revocation"] = v
+                # Convert string "true"/"false" to Python boolean
+                filter_params["is_revocation"] = v if isinstance(v, bool) else v.lower() == "true"
             else:
                 filter_params[k] = v
     builder.add_filters_from_params(filter_params)
@@ -357,9 +358,10 @@ async def post_details(organism: str, body: dict = {}):
         if k not in ["fields", "limit", "offset", "orderBy",
                     "nucleotideMutations", "aminoAcidMutations",
                     "nucleotideInsertions", "aminoAcidInsertions"]:
-            # Convert isRevocation -> is_revocation
+            # Convert isRevocation -> is_revocation and string to boolean
             if k == "isRevocation":
-                filter_params["is_revocation"] = v
+                # Convert string "true"/"false" to Python boolean
+                filter_params["is_revocation"] = v if isinstance(v, bool) else v.lower() == "true"
             else:
                 filter_params[k] = v
     builder.add_filters_from_params(filter_params)

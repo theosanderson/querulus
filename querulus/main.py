@@ -610,6 +610,93 @@ async def get_aligned_amino_acid_sequences(
         return Response(content=fasta_content, media_type="text/x-fasta")
 
 
+# ===== MUTATION ENDPOINTS (MOCK DATA) =====
+# TODO: These endpoints return empty mock data because mutation calling requires
+# alignment analysis that is not implemented yet. They return the correct format
+# to prevent client errors.
+
+
+@app.post("/{organism}/sample/nucleotideMutations")
+async def post_nucleotide_mutations(organism: str, request: Request):
+    """
+    Get nucleotide mutations (MOCK - returns empty data).
+
+    TODO: Implement actual mutation calling by comparing sequences to reference genome.
+    """
+    # Return empty data in LAPIS format
+    return JSONResponse(
+        content={
+            "data": [],
+            "info": {
+                "dataVersion": "0",
+                "requestId": str(uuid.uuid4()),
+                "requestInfo": f"{organism} nucleotide mutations (MOCK DATA)",
+                "queryInfo": "Mutations endpoint not yet implemented"
+            }
+        }
+    )
+
+
+@app.post("/{organism}/sample/aminoAcidMutations")
+async def post_amino_acid_mutations(organism: str, request: Request):
+    """
+    Get amino acid mutations (MOCK - returns empty data).
+
+    TODO: Implement actual mutation calling by comparing translated sequences to reference.
+    """
+    return JSONResponse(
+        content={
+            "data": [],
+            "info": {
+                "dataVersion": "0",
+                "requestId": str(uuid.uuid4()),
+                "requestInfo": f"{organism} amino acid mutations (MOCK DATA)",
+                "queryInfo": "Mutations endpoint not yet implemented"
+            }
+        }
+    )
+
+
+@app.post("/{organism}/sample/nucleotideInsertions")
+async def post_nucleotide_insertions(organism: str, request: Request):
+    """
+    Get nucleotide insertions (MOCK - returns empty data).
+
+    TODO: Implement actual insertion detection from alignments.
+    """
+    return JSONResponse(
+        content={
+            "data": [],
+            "info": {
+                "dataVersion": "0",
+                "requestId": str(uuid.uuid4()),
+                "requestInfo": f"{organism} nucleotide insertions (MOCK DATA)",
+                "queryInfo": "Insertions endpoint not yet implemented"
+            }
+        }
+    )
+
+
+@app.post("/{organism}/sample/aminoAcidInsertions")
+async def post_amino_acid_insertions(organism: str, request: Request):
+    """
+    Get amino acid insertions (MOCK - returns empty data).
+
+    TODO: Implement actual insertion detection from amino acid alignments.
+    """
+    return JSONResponse(
+        content={
+            "data": [],
+            "info": {
+                "dataVersion": "0",
+                "requestId": str(uuid.uuid4()),
+                "requestInfo": f"{organism} amino acid insertions (MOCK DATA)",
+                "queryInfo": "Insertions endpoint not yet implemented"
+            }
+        }
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
 

@@ -811,6 +811,53 @@ class TestDataFormats:
         assert non_none_countries[0] > "M", f"First country '{non_none_countries[0]}' suggests ascending order"
 
 
+class TestPostSequenceEndpoints:
+    """Test POST methods for sequence endpoints"""
+
+    def test_post_unaligned_nucleotide_sequences_with_accession(self):
+        """Test POST to unalignedNucleotideSequences with specific accessionVersion - ebola-sudan organism"""
+        # Use ebola-sudan organism as in the user's curl example
+        config = TestConfig(organism="ebola-sudan")
+
+        payload = {
+            "accessionVersion": "LOC_000018H.1",
+            "dataFormat": "FASTA"
+        }
+
+        lapis_resp = requests.post(
+            config.lapis_endpoint("sample/unalignedNucleotideSequences"),
+            json=payload
+        )
+        querulus_resp = requests.post(
+            config.querulus_endpoint("sample/unalignedNucleotideSequences"),
+            json=payload
+        )
+
+        assert lapis_resp.status_code == 200, f"LAPIS returned {lapis_resp.status_code}"
+        assert querulus_resp.status_code == 200, f"Querulus returned {querulus_resp.status_code}: {querulus_resp.text}"
+
+        # Both should return FASTA format
+        lapis_text = lapis_resp.text
+        querulus_text = querulus_resp.text
+
+        # Check FASTA format
+        assert lapis_text.startswith(">"), "LAPIS should return FASTA format"
+        assert querulus_text.startswith(">"), "Querulus should return FASTA format"
+
+        # Extract the sequences (everything after the header)
+        lapis_lines = lapis_text.split('\n')
+        querulus_lines = querulus_text.split('\n')
+
+        # Check headers match
+        assert lapis_lines[0] == querulus_lines[0], "FASTA headers should match"
+
+        # Check sequences match (join all lines after header, ignoring whitespace)
+        lapis_seq = ''.join(lapis_lines[1:]).replace('\n', '').replace('\r', '').strip()
+        querulus_seq = ''.join(querulus_lines[1:]).replace('\n', '').replace('\r', '').strip()
+
+        assert lapis_seq == querulus_seq, "Sequences should match exactly"
+
+
 if __name__ == "__main__":
     # Run tests with pytest
     import sys

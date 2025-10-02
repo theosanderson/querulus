@@ -615,6 +615,158 @@ async def get_unaligned_nucleotide_sequences(
             return Response(content=fasta_content, media_type="text/x-fasta")
 
 
+@app.post("/{organism}/sample/unalignedNucleotideSequences")
+async def post_unaligned_nucleotide_sequences(organism: str, request: Request, body: dict = {}):
+    """POST version of unaligned nucleotide sequences endpoint - accepts JSON body with query parameters."""
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+    # Extract parameters from body
+    limit = body.get("limit")
+    offset = body.get("offset", 0)
+    data_format = body.get("dataFormat", "FASTA")
+
+    # Build query using QueryBuilder
+    builder = QueryBuilder(organism, organism_config)
+
+    # Add filters (excluding special fields)
+    filter_params = {}
+    for k, v in body.items():
+        if k not in ["limit", "offset", "dataFormat"]:
+            filter_params[k] = v
+    builder.add_filters_from_params(filter_params)
+
+    # Build sequences query
+    query_str, params = builder.build_unaligned_sequences_query("main", limit, offset)
+
+    # Execute query
+    async for db in get_db():
+        result = await db.execute(text(query_str), params)
+        rows = result.fetchall()
+
+        # Decompress sequences
+        compression = request.app.state.compression
+        sequences = []
+
+        for row in rows:
+            accession_version = f"{row.accession}.{row.version}"
+            compressed_seq = row.compressed_seq
+
+            if not compressed_seq:
+                continue
+
+            try:
+                # Decompress sequence
+                sequence = compression.decompress_nucleotide_sequence(
+                    compressed_seq, organism, "main"
+                )
+                sequences.append({
+                    "accessionVersion": accession_version,
+                    "sequence": sequence
+                })
+            except Exception as e:
+                print(f"Error decompressing {accession_version}: {e}")
+                continue
+
+        # Return based on dataFormat
+        if data_format.upper() == "JSON":
+            # Return JSON array with accessionVersion and main (segment name)
+            json_data = [
+                {
+                    "accessionVersion": seq["accessionVersion"],
+                    "main": seq["sequence"]
+                }
+                for seq in sequences
+            ]
+            return JSONResponse(content=json_data)
+        else:
+            # Return FASTA format
+            fasta_lines = []
+            for seq in sequences:
+                fasta_lines.append(f">{seq['accessionVersion']}")
+                fasta_lines.append(seq["sequence"])
+            fasta_content = "\n".join(fasta_lines)
+            return Response(content=fasta_content, media_type="text/x-fasta")
+
+
+@app.post("/{organism}/sample/alignedNucleotideSequences")
+async def post_aligned_nucleotide_sequences(organism: str, request: Request, body: dict = {}):
+    """POST version of aligned nucleotide sequences endpoint - accepts JSON body with query parameters."""
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+    # Extract parameters from body
+    limit = body.get("limit")
+    offset = body.get("offset", 0)
+    data_format = body.get("dataFormat", "FASTA")
+
+    # Build query using QueryBuilder
+    builder = QueryBuilder(organism, organism_config)
+
+    # Add filters (excluding special fields)
+    filter_params = {}
+    for k, v in body.items():
+        if k not in ["limit", "offset", "dataFormat"]:
+            filter_params[k] = v
+    builder.add_filters_from_params(filter_params)
+
+    # Build sequences query
+    query_str, params = builder.build_aligned_sequences_query("main", limit, offset)
+
+    # Execute query
+    async for db in get_db():
+        result = await db.execute(text(query_str), params)
+        rows = result.fetchall()
+
+        # Decompress sequences
+        compression = request.app.state.compression
+        sequences = []
+
+        for row in rows:
+            accession_version = f"{row.accession}.{row.version}"
+            compressed_seq = row.compressed_seq
+
+            if not compressed_seq:
+                continue
+
+            try:
+                # Decompress sequence
+                sequence = compression.decompress_nucleotide_sequence(
+                    compressed_seq, organism, "main"
+                )
+                sequences.append({
+                    "accessionVersion": accession_version,
+                    "sequence": sequence
+                })
+            except Exception as e:
+                print(f"Error decompressing {accession_version}: {e}")
+                continue
+
+        # Return based on dataFormat
+        if data_format.upper() == "JSON":
+            # Return JSON array with accessionVersion and main (segment name)
+            json_data = [
+                {
+                    "accessionVersion": seq["accessionVersion"],
+                    "main": seq["sequence"]
+                }
+                for seq in sequences
+            ]
+            return JSONResponse(content=json_data)
+        else:
+            # Return FASTA format
+            fasta_lines = []
+            for seq in sequences:
+                fasta_lines.append(f">{seq['accessionVersion']}")
+                fasta_lines.append(seq["sequence"])
+            fasta_content = "\n".join(fasta_lines)
+            return Response(content=fasta_content, media_type="text/x-fasta")
+
+
 @app.get("/{organism}/sample/alignedAminoAcidSequences/{gene}")
 async def get_aligned_amino_acid_sequences(
     organism: str,

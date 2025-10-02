@@ -118,7 +118,8 @@ class QueryBuilder:
         self.organism_config = organism_config
         self.filters: dict[str, Any] = {}
         self.group_by_fields: list[str] = []
-        self.order_by_fields: list[str] = []
+        # Each item can be: str (field name, ascending by default) or tuple (field, direction)
+        self.order_by_fields: list[str | tuple[str, str]] = []
 
     # ------------------------------------------------------------------
     # Public API for configuring the builder
@@ -148,7 +149,9 @@ class QueryBuilder:
         self.group_by_fields = fields
         return self
 
-    def set_order_by_fields(self, fields: list[str]) -> "QueryBuilder":
+    def set_order_by_fields(self, fields: list[str | tuple[str, str]]) -> "QueryBuilder":
+        """Set order by fields. Each item can be a field name (str) or (field, direction) tuple.
+        Direction should be 'ascending' or 'descending' (LAPIS format)."""
         self.order_by_fields = fields
         return self
 
@@ -177,7 +180,9 @@ class QueryBuilder:
 
     def _order_dependency_fields(self) -> list[str]:
         dependencies: list[str] = []
-        for field in self.order_by_fields:
+        for item in self.order_by_fields:
+            # Extract field name (handle both str and tuple)
+            field = item[0] if isinstance(item, tuple) else item
             if field in {"random", "count"}:
                 continue
             definition = self._field_definition(field)
@@ -312,17 +317,27 @@ class QueryBuilder:
             return "count DESC" if context == "aggregated" else '"accession"'
 
         order_fragments: list[str] = []
-        for field in self.order_by_fields:
+        for item in self.order_by_fields:
+            # Parse field and direction
+            if isinstance(item, tuple):
+                field, direction = item
+                # LAPIS uses "ascending"/"descending", convert to SQL ASC/DESC
+                sql_direction = "DESC" if direction == "descending" else "ASC"
+            else:
+                field = item
+                sql_direction = "ASC"  # Default to ascending
+
             if field == "random":
                 order_fragments.append("RANDOM()")
                 continue
             if field == "count" and context == "aggregated":
-                order_fragments.append("count")
+                order_fragments.append(f"count {sql_direction} NULLS LAST")
                 continue
 
             definition = self._field_definition(field)
             fragments = definition.order_sql(self, use_alias=True)
-            order_fragments.extend(fragments)
+            # Add direction and NULLS LAST to each fragment for consistent null handling
+            order_fragments.extend(f"{frag} {sql_direction} NULLS LAST" for frag in fragments)
 
         return ", ".join(order_fragments)
 

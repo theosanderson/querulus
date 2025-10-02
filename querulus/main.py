@@ -227,10 +227,11 @@ async def post_aggregated(organism: str, body: dict = {}):
         for item in order_by_raw:
             if isinstance(item, dict) and "field" in item:
                 # Format: {field: "date", type: "descending"}
-                # We ignore the type for now (always ascending)
-                order_by_fields.append(item["field"])
+                field = item["field"]
+                direction = item.get("type", "ascending")  # Default to ascending
+                order_by_fields.append((field, direction))
             elif isinstance(item, str):
-                order_by_fields.append(item)
+                order_by_fields.append(item)  # String means ascending by default
     elif isinstance(order_by_raw, str):
         order_by_fields = [order_by_raw]
 
@@ -413,10 +414,11 @@ async def post_details(organism: str, body: dict = {}):
         for item in order_by_raw:
             if isinstance(item, dict) and "field" in item:
                 # Format: {field: "date", type: "descending"}
-                # We ignore the type for now (always ascending)
-                order_by_fields.append(item["field"])
+                field = item["field"]
+                direction = item.get("type", "ascending")  # Default to ascending
+                order_by_fields.append((field, direction))
             elif isinstance(item, str):
-                order_by_fields.append(item)
+                order_by_fields.append(item)  # String means ascending by default
     elif isinstance(order_by_raw, str):
         order_by_fields = [order_by_raw]
 

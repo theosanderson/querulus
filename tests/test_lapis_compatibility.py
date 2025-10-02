@@ -774,6 +774,42 @@ class TestDataFormats:
         assert "data" in data
         assert "info" in data
 
+    def test_post_details_descending_order(self, config: TestConfig):
+        """Test POST details endpoint with descending order"""
+        payload = {
+            "versionStatus": "LATEST_VERSION",
+            "isRevocation": "false",
+            "fields": ["geoLocCountry", "accessionVersion"],
+            "limit": 10,
+            "offset": 0,
+            "orderBy": [{"field": "geoLocCountry", "type": "descending"}]
+        }
+
+        querulus_resp = requests.post(config.querulus_endpoint("sample/details"), json=payload)
+
+        assert querulus_resp.status_code == 200
+
+        querulus_data = querulus_resp.json()["data"]
+
+        # Check that we have data
+        assert len(querulus_data) > 0
+
+        # Verify descending order
+        countries = [item.get("geoLocCountry") for item in querulus_data]
+        # Check that it's actually descending (allowing for None values)
+        non_none_countries = [c for c in countries if c is not None]
+
+        assert len(non_none_countries) > 1, "Need at least 2 non-null countries to test ordering"
+
+        # Countries should be in descending order
+        for i in range(len(non_none_countries) - 1):
+            assert non_none_countries[i] >= non_none_countries[i + 1], \
+                f"Countries not in descending order: {non_none_countries[i]} should be >= {non_none_countries[i + 1]}"
+
+        # Verify that first country is lexicographically high (like Zimbabwe, Zambia, etc)
+        # Not 'Albania' which would indicate ascending order
+        assert non_none_countries[0] > "M", f"First country '{non_none_countries[0]}' suggests ascending order"
+
 
 if __name__ == "__main__":
     # Run tests with pytest

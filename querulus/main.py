@@ -166,6 +166,64 @@ async def get_aggregated(
         }
 
 
+@app.post("/{organism}/sample/aggregated")
+async def post_aggregated(organism: str, body: dict = {}):
+    """POST version of aggregated endpoint - accepts JSON body with query parameters."""
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+    # Convert body to QueryBuilder format
+    fields_list = body.get("fields", [])
+    group_by_fields = fields_list if isinstance(fields_list, list) else []
+
+    limit = body.get("limit")
+    offset = body.get("offset", 0)
+    order_by_fields = body.get("orderBy", [])
+    if not isinstance(order_by_fields, list):
+        order_by_fields = [order_by_fields] if order_by_fields else []
+
+    # Build query
+    builder = QueryBuilder(organism, organism_config)
+    builder.set_group_by_fields(group_by_fields)
+    builder.set_order_by_fields(order_by_fields)
+
+    # Add filters (excluding special fields)
+    filter_params = {k: v for k, v in body.items()
+                    if k not in ["fields", "limit", "offset", "orderBy",
+                               "nucleotideMutations", "aminoAcidMutations",
+                               "nucleotideInsertions", "aminoAcidInsertions"]}
+    builder.add_filters_from_params(filter_params)
+
+    # Execute query
+    async for db in get_db():
+        query_str, params = builder.build_aggregated_query(limit, offset)
+        result = await db.execute(text(query_str), params)
+        rows = result.fetchall()
+
+        # Format results
+        data = []
+        if group_by_fields:
+            for row in rows:
+                row_dict = {"count": row.count}
+                for field in group_by_fields:
+                    row_dict[field] = row._mapping[field]
+                data.append(row_dict)
+        else:
+            data = [{"count": rows[0].count if rows else 0}]
+
+        return {
+            "data": data,
+            "info": {
+                "dataVersion": "0",
+                "requestId": str(uuid.uuid4()),
+                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
+                "queryInfo": "Aggregated query",
+            },
+        }
+
+
 @app.get("/{organism}/sample/details")
 async def get_details(
     organism: str,
@@ -237,6 +295,55 @@ async def get_details(
             "info": {
                 "dataVersion": "0",  # TODO: Implement versioning
                 "requestId": request_id,
+                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
+                "queryInfo": "Details query",
+            },
+        }
+
+
+@app.post("/{organism}/sample/details")
+async def post_details(organism: str, body: dict = {}):
+    """POST version of details endpoint - accepts JSON body with query parameters."""
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+    # Extract parameters from body
+    fields_list = body.get("fields", [])
+    selected_fields = fields_list if isinstance(fields_list, list) and fields_list else None
+
+    limit = body.get("limit")
+    offset = body.get("offset", 0)
+    order_by_fields = body.get("orderBy", [])
+    if not isinstance(order_by_fields, list):
+        order_by_fields = [order_by_fields] if order_by_fields else []
+
+    # Build query
+    builder = QueryBuilder(organism, organism_config)
+    builder.set_order_by_fields(order_by_fields)
+
+    # Add filters (excluding special fields)
+    filter_params = {k: v for k, v in body.items()
+                    if k not in ["fields", "limit", "offset", "orderBy",
+                               "nucleotideMutations", "aminoAcidMutations",
+                               "nucleotideInsertions", "aminoAcidInsertions"]}
+    builder.add_filters_from_params(filter_params)
+
+    # Execute query
+    async for db in get_db():
+        query_str, params = builder.build_details_query(selected_fields, limit, offset)
+        result = await db.execute(text(query_str), params)
+        rows = result.fetchall()
+
+        # Format results
+        data = [dict(row._mapping) for row in rows]
+
+        return {
+            "data": data,
+            "info": {
+                "dataVersion": "0",
+                "requestId": str(uuid.uuid4()),
                 "requestInfo": f"{organism_config.schema['organismName']} on querulus",
                 "queryInfo": "Details query",
             },

@@ -239,19 +239,18 @@ This file tracks implementation progress for the Querulus project. It should be 
 
 ### Immediate (Next Session)
 
-**CRITICAL: Add static analysis to catch runtime errors**
-1. **Set up mypy for type checking**:
-   - Add mypy to dev dependencies
-   - Configure mypy.ini with strict settings
-   - Add pre-commit hook to run mypy
-   - Would have caught the missing `logger` import
+**CRITICAL: Add POST support for aggregated and details endpoints**
+1. **Add POST endpoints**:
+   - POST /{organism}/sample/aggregated
+   - POST /{organism}/sample/details
+   - Accept JSON body with same parameters as query strings
+   - Support versionStatus, isRevocation, fields, limit, offset, orderBy
+   - Ignore mutation/insertion arrays for now (not implemented)
 
-2. **Add pre-commit hooks**:
-   - black (code formatting)
-   - isort (import sorting)
-   - flake8 (linting)
-   - mypy (type checking)
-   - Run on all commits to catch issues early
+2. **Fix database connection in Kubernetes**:
+   - ✅ Simplified config.py to use DB_URL, DB_USERNAME, DB_PASSWORD (no prefix)
+   - ✅ Added logging to show connection details in /ready endpoint
+   - Test that pods connect to database service correctly
 
 3. **Test Docker build locally**:
    - Build Docker image locally
@@ -259,19 +258,19 @@ This file tracks implementation progress for the Querulus project. It should be 
    - Verify health checks work
    - Test connection to PostgreSQL
 
-2. **Push commits and trigger GitHub Actions**:
+4. **Push commits and trigger GitHub Actions**:
    - Push to origin/main
    - Verify GitHub Actions workflow runs successfully
    - Check that Docker image is pushed to ghcr.io
 
-3. **Test Kubernetes deployment**:
+5. **Test Kubernetes deployment**:
    - Deploy to test environment with `useQuerulus=true`
    - Verify Querulus pods start successfully
    - Verify config is loaded correctly
    - Test all endpoints through Kubernetes
    - Compare performance with LAPIS
 
-4. **Performance testing**:
+6. **Performance testing**:
    - Benchmark response times
    - Test under load (100+ req/s)
    - Monitor memory usage

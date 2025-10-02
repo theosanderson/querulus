@@ -201,7 +201,7 @@ class QueryBuilder:
 
         # Apply window function to get minimum across versions
         # This ensures later versions inherit earlier earliestReleaseDate
-        return f"LEAST({least_expr}, MIN({least_expr}) OVER (PARTITION BY accession ORDER BY version ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))"
+        return f"LEAST({least_expr}, MIN({least_expr}) OVER (PARTITION BY sequence_entries_view.accession ORDER BY version ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))"
 
     def build_data_use_terms_expression(self) -> str:
         """
@@ -681,14 +681,31 @@ class QueryBuilder:
         needs_display_name = (selected_fields and "displayName" in selected_fields) or "displayName" in self.filters
 
         # If we need versionStatus, earliestReleaseDate, accessionVersion, or displayName (for selection or filtering), use CTE
-        needs_cte = needs_version_status or needs_earliest_release or needs_accession_version or needs_display_name
+        # Also use CTE if no fields specified (default: return all fields)
+        needs_cte = needs_version_status or needs_earliest_release or needs_accession_version or needs_display_name or (selected_fields is None)
 
         if needs_cte:
             # Determine all fields we need to compute (selected fields + filtered fields)
-            all_fields = set(selected_fields) if selected_fields else set()
-            all_fields.update(self.filters.keys())
-            # Always include accession for ordering
-            all_fields.add("accession")
+            if selected_fields is None:
+                # When no fields specified, build ALL available fields
+                all_fields = set(computed_fields)
+                # Add basic table columns
+                all_fields.add("accession")
+                all_fields.add("version")
+                # Add all metadata fields from schema
+                if self.organism_config and self.organism_config.schema:
+                    metadata_schema = self.organism_config.schema.get("metadata", [])
+                    for field_def in metadata_schema:
+                        field_name = field_def.get("name")
+                        if field_name:
+                            all_fields.add(field_name)
+                # Add filtered fields
+                all_fields.update(self.filters.keys())
+            else:
+                all_fields = set(selected_fields)
+                all_fields.update(self.filters.keys())
+                # Always include accession for ordering
+                all_fields.add("accession")
 
             # Build SELECT clause for CTE
             select_parts = []
@@ -698,7 +715,7 @@ class QueryBuilder:
                 elif field == "version":
                     select_parts.append("version")
                 elif field == "accessionVersion" or field == "displayName":
-                    select_parts.append(f"(accession || '.' || version) AS \"{field}\"")
+                    select_parts.append(f"(sequence_entries_view.accession || '.' || version) AS \"{field}\"")
                 elif field == "submittedDate":
                     select_parts.append(f"TO_CHAR(submitted_at, 'YYYY-MM-DD') AS \"{field}\"")
                 elif field == "submittedAtTimestamp":
@@ -715,7 +732,7 @@ class QueryBuilder:
                     # Compute versionStatus using window functions
                     select_parts.append(f"""
                         CASE
-                            WHEN version = MAX(version) OVER (PARTITION BY accession) THEN 'LATEST_VERSION'
+                            WHEN version = MAX(version) OVER (PARTITION BY sequence_entries_view.accession) THEN 'LATEST_VERSION'
                             WHEN EXISTS (
                                 SELECT 1 FROM sequence_entries_view sev2
                                 WHERE sev2.accession = sequence_entries_view.accession

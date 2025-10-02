@@ -181,7 +181,10 @@ async def post_aggregated(organism: str, body: dict = {}):
     limit = body.get("limit")
     offset = body.get("offset", 0)
     order_by_fields = body.get("orderBy", [])
-    if not isinstance(order_by_fields, list):
+    # Ensure it's a list of strings
+    if isinstance(order_by_fields, dict):
+        order_by_fields = []
+    elif not isinstance(order_by_fields, list):
         order_by_fields = [order_by_fields] if order_by_fields else []
 
     # Build query
@@ -189,11 +192,17 @@ async def post_aggregated(organism: str, body: dict = {}):
     builder.set_group_by_fields(group_by_fields)
     builder.set_order_by_fields(order_by_fields)
 
-    # Add filters (excluding special fields)
-    filter_params = {k: v for k, v in body.items()
-                    if k not in ["fields", "limit", "offset", "orderBy",
-                               "nucleotideMutations", "aminoAcidMutations",
-                               "nucleotideInsertions", "aminoAcidInsertions"]}
+    # Add filters (excluding special fields), converting camelCase to snake_case
+    filter_params = {}
+    for k, v in body.items():
+        if k not in ["fields", "limit", "offset", "orderBy",
+                    "nucleotideMutations", "aminoAcidMutations",
+                    "nucleotideInsertions", "aminoAcidInsertions"]:
+            # Convert isRevocation -> is_revocation
+            if k == "isRevocation":
+                filter_params["is_revocation"] = v
+            else:
+                filter_params[k] = v
     builder.add_filters_from_params(filter_params)
 
     # Execute query
@@ -316,18 +325,27 @@ async def post_details(organism: str, body: dict = {}):
     limit = body.get("limit")
     offset = body.get("offset", 0)
     order_by_fields = body.get("orderBy", [])
-    if not isinstance(order_by_fields, list):
+    # Ensure it's a list of strings
+    if isinstance(order_by_fields, dict):
+        order_by_fields = []
+    elif not isinstance(order_by_fields, list):
         order_by_fields = [order_by_fields] if order_by_fields else []
 
     # Build query
     builder = QueryBuilder(organism, organism_config)
     builder.set_order_by_fields(order_by_fields)
 
-    # Add filters (excluding special fields)
-    filter_params = {k: v for k, v in body.items()
-                    if k not in ["fields", "limit", "offset", "orderBy",
-                               "nucleotideMutations", "aminoAcidMutations",
-                               "nucleotideInsertions", "aminoAcidInsertions"]}
+    # Add filters (excluding special fields), converting camelCase to snake_case
+    filter_params = {}
+    for k, v in body.items():
+        if k not in ["fields", "limit", "offset", "orderBy",
+                    "nucleotideMutations", "aminoAcidMutations",
+                    "nucleotideInsertions", "aminoAcidInsertions"]:
+            # Convert isRevocation -> is_revocation
+            if k == "isRevocation":
+                filter_params["is_revocation"] = v
+            else:
+                filter_params[k] = v
     builder.add_filters_from_params(filter_params)
 
     # Execute query

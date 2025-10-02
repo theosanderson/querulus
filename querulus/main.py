@@ -180,12 +180,20 @@ async def post_aggregated(organism: str, body: dict = {}):
 
     limit = body.get("limit")
     offset = body.get("offset", 0)
-    order_by_fields = body.get("orderBy", [])
-    # Ensure it's a list of strings
-    if isinstance(order_by_fields, dict):
-        order_by_fields = []
-    elif not isinstance(order_by_fields, list):
-        order_by_fields = [order_by_fields] if order_by_fields else []
+
+    # Parse orderBy - can be array of strings or array of {field, type} objects
+    order_by_raw = body.get("orderBy", [])
+    order_by_fields = []
+    if isinstance(order_by_raw, list):
+        for item in order_by_raw:
+            if isinstance(item, dict) and "field" in item:
+                # Format: {field: "date", type: "descending"}
+                # We ignore the type for now (always ascending)
+                order_by_fields.append(item["field"])
+            elif isinstance(item, str):
+                order_by_fields.append(item)
+    elif isinstance(order_by_raw, str):
+        order_by_fields = [order_by_raw]
 
     # Build query
     builder = QueryBuilder(organism, organism_config)
@@ -324,12 +332,20 @@ async def post_details(organism: str, body: dict = {}):
 
     limit = body.get("limit")
     offset = body.get("offset", 0)
-    order_by_fields = body.get("orderBy", [])
-    # Ensure it's a list of strings
-    if isinstance(order_by_fields, dict):
-        order_by_fields = []
-    elif not isinstance(order_by_fields, list):
-        order_by_fields = [order_by_fields] if order_by_fields else []
+
+    # Parse orderBy - can be array of strings or array of {field, type} objects
+    order_by_raw = body.get("orderBy", [])
+    order_by_fields = []
+    if isinstance(order_by_raw, list):
+        for item in order_by_raw:
+            if isinstance(item, dict) and "field" in item:
+                # Format: {field: "date", type: "descending"}
+                # We ignore the type for now (always ascending)
+                order_by_fields.append(item["field"])
+            elif isinstance(item, str):
+                order_by_fields.append(item)
+    elif isinstance(order_by_raw, str):
+        order_by_fields = [order_by_raw]
 
     # Build query
     builder = QueryBuilder(organism, organism_config)

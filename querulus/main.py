@@ -1,14 +1,15 @@
-"""Main FastAPI application"""
+"""Main FastAPI application (refactored to reduce duplication)"""
 
+import json
 import logging
 import uuid
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union, Callable
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from querulus.config import config
 from querulus.database import init_db, close_db, get_db, health_check
@@ -16,6 +17,10 @@ from querulus.query_builder import QueryBuilder
 from querulus.compression import CompressionService
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# Lifespan
+# =============================================================================
 
 
 @asynccontextmanager
@@ -59,6 +64,219 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# =============================================================================
+# Error handling & utilities
+# =============================================================================
+
+
+class OrganismNotFound(Exception):
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
+
+
+@app.exception_handler(OrganismNotFound)
+async def organism_not_found_handler(_request: Request, exc: OrganismNotFound):
+    return JSONResponse(status_code=404, content={"error": exc.message})
+
+
+def validate_organism_or_404(organism: str):
+    try:
+        return config.get_organism_config(organism)
+    except ValueError as e:
+        raise OrganismNotFound(str(e))
+
+
+def parse_fields_param(fields: Optional[str]) -> List[str]:
+    return [f.strip() for f in fields.split(",")] if fields else []
+
+
+def parse_order_by_get(request: Request) -> List[str]:
+    qp = request.query_params
+    if hasattr(qp, "getlist"):
+        order_by = qp.getlist("orderBy")
+        if order_by:
+            return order_by
+    if "orderBy" in qp:
+        return [qp["orderBy"]]
+    return []
+
+
+def parse_order_by_post(order_by_raw: Union[str, List[Union[str, Mapping[str, Any]]], None]) -> List[Union[str, Tuple[str, str]]]:
+    if order_by_raw is None:
+        return []
+    if isinstance(order_by_raw, str):
+        return [order_by_raw]
+    out: List[Union[str, Tuple[str, str]]] = []
+    if isinstance(order_by_raw, list):
+        for item in order_by_raw:
+            if isinstance(item, str):
+                out.append(item)  # ascending by default
+            elif isinstance(item, dict) and "field" in item:
+                out.append((item["field"], item.get("type", "ascending")))
+    return out
+
+
+def extract_filters(source: Mapping[str, Any], exclude: Iterable[str] = ()) -> Dict[str, Any]:
+    exclude_set = set(exclude)
+    return {k: v for k, v in source.items() if k not in exclude_set}
+
+
+async def execute_and_fetch(query_str: str, params: Mapping[str, Any]) -> List[Any]:
+    async for db in get_db():
+        result = await db.execute(text(query_str), params)
+        return result.fetchall()
+    return []
+
+
+def make_info(organism_config, query_info: str) -> Dict[str, Any]:
+    return {
+        "dataVersion": "0",
+        "requestId": str(uuid.uuid4()),
+        "requestInfo": f"{organism_config.schema['organismName']} on querulus",
+        "queryInfo": query_info,
+    }
+
+
+def dict_rows_to_tsv(rows: List[Dict[str, Any]], explicit_columns: Optional[List[str]] = None) -> str:
+    if not rows:
+        return ""
+    columns = explicit_columns or list(rows[0].keys())
+    lines = ["\t".join(columns)]
+    for row in rows:
+        vals: List[str] = []
+        for col in columns:
+            value = row.get(col, "")
+            if value is None:
+                vals.append("")
+            elif isinstance(value, (dict, list)):
+                vals.append(json.dumps(value))
+            else:
+                vals.append(str(value))
+        lines.append("\t".join(vals))
+    return "\n".join(lines)
+
+
+def maybe_attachment(response: Response, download: bool, basename: Optional[str], data_format: str, default_base: str):
+    if download:
+        filename = basename or default_base
+        if data_format.upper() == "JSON":
+            filename += ".json"
+        elif data_format.upper() == "TSV":
+            filename += ".tsv"
+        else:
+            filename += ".fasta"
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+
+
+def accession_version(row) -> str:
+    return f"{row.accession}.{row.version}"
+
+
+# =============================================================================
+# Shared sequence handling
+# =============================================================================
+
+
+async def handle_nucleotide_sequences(
+    *,
+    organism: str,
+    request: Request,
+    segment: str,
+    data_format: str,
+    limit: Optional[int],
+    offset: int,
+    filters: Mapping[str, Any],
+    builder_query_fn: Callable[[QueryBuilder, str, Optional[int], int], Tuple[str, Dict[str, Any]]],
+    default_download_name: str,
+    download_as_file: bool = False,
+    download_basename: Optional[str] = None,
+) -> Response:
+    organism_config = validate_organism_or_404(organism)
+
+    # Build query
+    builder = QueryBuilder(organism, organism_config)
+    builder.add_filters_from_params(dict(filters))
+    query_str, params = builder_query_fn(builder, segment, limit, offset)
+
+    rows = await execute_and_fetch(query_str, params)
+
+    # Decompress
+    compression = request.app.state.compression
+    seqs: List[Dict[str, str]] = []
+    for row in rows:
+        av = accession_version(row)
+        compressed = row.compressed_seq
+        if not compressed:
+            continue
+        try:
+            seq = compression.decompress_nucleotide_sequence(compressed, organism, segment)
+            seqs.append({"accessionVersion": av, "sequence": seq})
+        except Exception as e:
+            logger.error(f"Error decompressing {av}: {e}")
+
+    # Format
+    if data_format.upper() == "JSON":
+        payload = [{"accessionVersion": s["accessionVersion"], segment: s["sequence"]} for s in seqs]
+        resp = JSONResponse(content=payload)
+    else:
+        lines: List[str] = []
+        for s in seqs:
+            lines.append(f">{s['accessionVersion']}")
+            lines.append(s["sequence"])
+        resp = Response(content="\n".join(lines), media_type="text/x-fasta")
+
+    # Optional download header
+    maybe_attachment(resp, download_as_file, download_basename, data_format, default_download_name)
+    return resp
+
+
+async def handle_amino_acid_sequences(
+    *,
+    organism: str,
+    request: Request,
+    gene: str,
+    data_format: str,
+    limit: Optional[int],
+    offset: int,
+    filters: Mapping[str, Any],
+) -> Response:
+    organism_config = validate_organism_or_404(organism)
+
+    builder = QueryBuilder(organism, organism_config)
+    builder.add_filters_from_params(dict(filters))
+    query_str, params = builder.build_amino_acid_sequences_query(gene, limit, offset)
+
+    rows = await execute_and_fetch(query_str, params)
+
+    compression = request.app.state.compression
+    seqs: List[Dict[str, str]] = []
+    for row in rows:
+        av = accession_version(row)
+        compressed = row.compressed_seq
+        if not compressed:
+            continue
+        try:
+            seq = compression.decompress_amino_acid_sequence(compressed, organism, gene)
+            seqs.append({"accessionVersion": av, "sequence": seq})
+        except Exception as e:
+            logger.error(f"Error decompressing {av}: {e}")
+
+    if data_format.upper() == "JSON":
+        payload = [{"accessionVersion": s["accessionVersion"], gene: s["sequence"]} for s in seqs]
+        return JSONResponse(content=payload)
+    else:
+        lines: List[str] = []
+        for s in seqs:
+            lines.append(f">{s['accessionVersion']}")
+            lines.append(s["sequence"])
+        return Response(content="\n".join(lines), media_type="text/x-fasta")
+
+
+# =============================================================================
+# Root / Health / Ready
+# =============================================================================
+
 
 @app.get("/")
 async def root():
@@ -96,6 +314,11 @@ async def ready():
     return {"status": "ready"}
 
 
+# =============================================================================
+# Aggregated
+# =============================================================================
+
+
 @app.get("/{organism}/sample/aggregated")
 async def get_aggregated(
     organism: str,
@@ -107,174 +330,87 @@ async def get_aggregated(
 ):
     """
     Get aggregated sequence counts with optional grouping by metadata fields.
-
-    Examples:
-    - GET /west-nile/sample/aggregated - Total count
-    - GET /west-nile/sample/aggregated?fields=geoLocCountry - Group by country
-    - GET /west-nile/sample/aggregated?geoLocCountry=USA - Filter by country
-    - GET /west-nile/sample/aggregated?fields=geoLocCountry&geoLocCountry=USA - Both
-    - GET /west-nile/sample/aggregated?fields=geoLocCountry&dataFormat=tsv - TSV format
     """
-    # Validate organism
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
-
-    # Parse fields parameter
-    group_by_fields = []
-    if fields:
-        group_by_fields = [f.strip() for f in fields.split(",")]
-
-    # Parse orderBy parameter (can appear multiple times)
-    order_by_fields = request.query_params.getlist("orderBy") if hasattr(request.query_params, "getlist") else []
-    if not order_by_fields and "orderBy" in request.query_params:
-        order_by_fields = [request.query_params["orderBy"]]
-
-    # Build query using QueryBuilder
-    builder = QueryBuilder(organism, organism_config)
-    builder.set_group_by_fields(group_by_fields)
-    builder.set_order_by_fields(order_by_fields)
-
-    # Add filters from query parameters
-    # Extract all query params except special ones
-    query_params = dict(request.query_params)
-    builder.add_filters_from_params(query_params)
-
-    # Get database session
-    async for db in get_db():
-        # Build and execute query
-        query_str, params = builder.build_aggregated_query(limit, offset)
-        result = await db.execute(text(query_str), params)
-
-        # Format results
-        rows = result.fetchall()
-        data = []
-
-        if group_by_fields:
-            # Return grouped results with field names
-            for row in rows:
-                row_dict = {}
-                for field in group_by_fields:
-                    # Use _mapping to access column by name (handles camelCase)
-                    row_dict[field] = row._mapping[field]
-                row_dict["count"] = row.count
-                data.append(row_dict)
-        else:
-            # Simple total count
-            data = [{"count": rows[0].count if rows else 0}]
-
-        # Return based on dataFormat
-        if dataFormat.upper() == "TSV":
-            # Generate TSV output
-            if not data:
-                return Response(content="", media_type="text/tab-separated-values")
-
-            # Get column names (fields + count)
-            columns = []
-            if group_by_fields:
-                columns.extend(group_by_fields)
-            columns.append("count")
-
-            # Build TSV
-            tsv_lines = ["\t".join(columns)]
-            for row_dict in data:
-                row_values = []
-                for col in columns:
-                    value = row_dict.get(col, "")
-                    # Convert None to empty string, otherwise convert to string
-                    row_values.append("" if value is None else str(value))
-                tsv_lines.append("\t".join(row_values))
-
-            tsv_content = "\n".join(tsv_lines)
-            return Response(content=tsv_content, media_type="text/tab-separated-values")
-        else:
-            # Return JSON format
-            # Generate request ID
-            request_id = str(uuid.uuid4())
-
-            # Return LAPIS-compatible response
-            return {
-                "data": data,
-                "info": {
-                    "dataVersion": "0",  # TODO: Implement versioning
-                    "requestId": request_id,
-                    "requestInfo": f"{organism_config.schema['organismName']} on querulus",
-                    "queryInfo": "Aggregated query",
-                },
-            }
-
-
-@app.post("/{organism}/sample/aggregated")
-async def post_aggregated(organism: str, body: dict = {}):
-    """POST version of aggregated endpoint - accepts JSON body with query parameters."""
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
-
-    # Convert body to QueryBuilder format
-    fields_list = body.get("fields", [])
-    group_by_fields = fields_list if isinstance(fields_list, list) else []
-
-    limit = body.get("limit")
-    offset = body.get("offset", 0)
-
-    # Parse orderBy - can be array of strings or array of {field, type} objects
-    order_by_raw = body.get("orderBy", [])
-    order_by_fields = []
-    if isinstance(order_by_raw, list):
-        for item in order_by_raw:
-            if isinstance(item, dict) and "field" in item:
-                # Format: {field: "date", type: "descending"}
-                field = item["field"]
-                direction = item.get("type", "ascending")  # Default to ascending
-                order_by_fields.append((field, direction))
-            elif isinstance(item, str):
-                order_by_fields.append(item)  # String means ascending by default
-    elif isinstance(order_by_raw, str):
-        order_by_fields = [order_by_raw]
+    organism_config = validate_organism_or_404(organism)
+    group_by_fields = parse_fields_param(fields)
+    order_by_fields = parse_order_by_get(request)
 
     # Build query
     builder = QueryBuilder(organism, organism_config)
     builder.set_group_by_fields(group_by_fields)
     builder.set_order_by_fields(order_by_fields)
+    builder.add_filters_from_params(dict(request.query_params))
 
-    # Add filters (excluding special fields)
-    filter_params = {}
-    for k, v in body.items():
-        if k not in ["fields", "limit", "offset", "orderBy",
-                    "nucleotideMutations", "aminoAcidMutations",
-                    "nucleotideInsertions", "aminoAcidInsertions"]:
-            filter_params[k] = v
+    query_str, params = builder.build_aggregated_query(limit, offset)
+    rows = await execute_and_fetch(query_str, params)
+
+    # Format results
+    if group_by_fields:
+        data: List[Dict[str, Any]] = []
+        for row in rows:
+            rd = {field: row._mapping[field] for field in group_by_fields}
+            rd["count"] = row.count
+            data.append(rd)
+    else:
+        data = [{"count": rows[0].count if rows else 0}]
+
+    if dataFormat.upper() == "TSV":
+        columns = [*group_by_fields, "count"] if group_by_fields else ["count"]
+        tsv = dict_rows_to_tsv(data, explicit_columns=columns)
+        return Response(content=tsv, media_type="text/tab-separated-values")
+
+    return {
+        "data": data,
+        "info": make_info(organism_config, "Aggregated query"),
+    }
+
+
+@app.post("/{organism}/sample/aggregated")
+async def post_aggregated(organism: str, body: dict = {}):
+    """POST version of aggregated endpoint - accepts JSON body with query parameters."""
+    organism_config = validate_organism_or_404(organism)
+
+    group_by_fields = body.get("fields", [])
+    limit = body.get("limit")
+    offset = body.get("offset", 0)
+    order_by_fields = parse_order_by_post(body.get("orderBy", []))
+
+    builder = QueryBuilder(organism, organism_config)
+    builder.set_group_by_fields(group_by_fields if isinstance(group_by_fields, list) else [])
+    builder.set_order_by_fields(order_by_fields)
+
+    filter_params = extract_filters(
+        body,
+        exclude=[
+            "fields", "limit", "offset", "orderBy",
+            "nucleotideMutations", "aminoAcidMutations",
+            "nucleotideInsertions", "aminoAcidInsertions",
+        ],
+    )
     builder.add_filters_from_params(filter_params)
 
-    # Execute query
-    async for db in get_db():
-        query_str, params = builder.build_aggregated_query(limit, offset)
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
+    query_str, params = builder.build_aggregated_query(limit, offset)
+    rows = await execute_and_fetch(query_str, params)
 
-        # Format results
-        data = []
-        if group_by_fields:
-            for row in rows:
-                row_dict = {"count": row.count}
-                for field in group_by_fields:
-                    row_dict[field] = row._mapping[field]
-                data.append(row_dict)
-        else:
-            data = [{"count": rows[0].count if rows else 0}]
+    if group_by_fields:
+        data: List[Dict[str, Any]] = []
+        for row in rows:
+            rd = {"count": row.count}
+            for field in group_by_fields:
+                rd[field] = row._mapping[field]
+            data.append(rd)
+    else:
+        data = [{"count": rows[0].count if rows else 0}]
 
-        return {
-            "data": data,
-            "info": {
-                "dataVersion": "0",
-                "requestId": str(uuid.uuid4()),
-                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
-                "queryInfo": "Aggregated query",
-            },
-        }
+    return {
+        "data": data,
+        "info": make_info(organism_config, "Aggregated query"),
+    }
+
+
+# =============================================================================
+# Details
+# =============================================================================
 
 
 @app.get("/{organism}/sample/details")
@@ -288,171 +424,75 @@ async def get_details(
 ):
     """
     Get detailed metadata for sequences.
-
-    Examples:
-    - GET /west-nile/sample/details?limit=10
-    - GET /west-nile/sample/details?fields=accession,geoLocCountry,lineage&limit=5
-    - GET /west-nile/sample/details?geoLocCountry=USA&limit=10
-    - GET /west-nile/sample/details?limit=10&dataFormat=tsv
     """
-    # Validate organism
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
+    organism_config = validate_organism_or_404(organism)
+    selected_fields = parse_fields_param(fields) or None
+    order_by_fields = parse_order_by_get(request)
 
-    # Parse fields parameter
-    selected_fields = None
-    if fields:
-        selected_fields = [f.strip() for f in fields.split(",")]
-
-    # Parse orderBy parameter (can appear multiple times)
-    order_by_fields = request.query_params.getlist("orderBy") if hasattr(request.query_params, "getlist") else []
-    if not order_by_fields and "orderBy" in request.query_params:
-        order_by_fields = [request.query_params["orderBy"]]
-
-    # Build query using QueryBuilder
     builder = QueryBuilder(organism, organism_config)
     builder.set_order_by_fields(order_by_fields)
-
-    # Add filters from query parameters
     query_params = dict(request.query_params)
     builder.add_filters_from_params(query_params)
 
-    # Get database session
-    async for db in get_db():
-        # Build and execute query
-        query_str, params = builder.build_details_query(selected_fields, limit, offset)
-        # Debug logging
-        if "versionStatus" in query_params:
-            print(f"\n=== DEBUG: Details query with versionStatus filter ===")
-            print(f"Query:\n{query_str}")
-            print(f"Params: {params}")
-            print("=" * 60)
-        result = await db.execute(text(query_str), params)
+    query_str, params = builder.build_details_query(selected_fields, limit, offset)
 
-        # Format results
-        rows = result.fetchall()
-        data = []
+    # Debug parity with original
+    if "versionStatus" in query_params:
+        print("\n=== DEBUG: Details query with versionStatus filter ===")
+        print(f"Query:\n{query_str}")
+        print(f"Params: {params}")
+        print("=" * 60)
 
-        for row in rows:
-            row_dict = {}
-            # Get all columns from the row
-            for key in row._mapping.keys():
-                value = row._mapping[key]
-                # Convert any non-serializable types
-                if isinstance(value, dict):
-                    row_dict[key] = value
-                else:
-                    row_dict[key] = value
-            data.append(row_dict)
+    rows = await execute_and_fetch(query_str, params)
+    data = [dict(row._mapping) for row in rows]
 
-        # Return based on dataFormat
-        if dataFormat.upper() == "TSV":
-            # Generate TSV output
-            if not data:
-                return Response(content="", media_type="text/tab-separated-values")
+    if dataFormat.upper() == "TSV":
+        tsv = dict_rows_to_tsv(data)
+        return Response(content=tsv, media_type="text/tab-separated-values")
 
-            # Get all column names from first row
-            columns = list(data[0].keys())
-
-            # Build TSV
-            tsv_lines = ["\t".join(columns)]
-            for row_dict in data:
-                row_values = []
-                for col in columns:
-                    value = row_dict.get(col, "")
-                    # Convert None to empty string, handle special types
-                    if value is None:
-                        row_values.append("")
-                    elif isinstance(value, dict) or isinstance(value, list):
-                        # Convert complex types to JSON string
-                        import json
-                        row_values.append(json.dumps(value))
-                    else:
-                        row_values.append(str(value))
-                tsv_lines.append("\t".join(row_values))
-
-            tsv_content = "\n".join(tsv_lines)
-            return Response(content=tsv_content, media_type="text/tab-separated-values")
-        else:
-            # Return JSON format
-            # Generate request ID
-            request_id = str(uuid.uuid4())
-
-            # Return LAPIS-compatible response
-            return {
-                "data": data,
-                "info": {
-                    "dataVersion": "0",  # TODO: Implement versioning
-                    "requestId": request_id,
-                    "requestInfo": f"{organism_config.schema['organismName']} on querulus",
-                    "queryInfo": "Details query",
-                },
-            }
+    return {
+        "data": data,
+        "info": make_info(organism_config, "Details query"),
+    }
 
 
 @app.post("/{organism}/sample/details")
 async def post_details(organism: str, body: dict = {}):
     """POST version of details endpoint - accepts JSON body with query parameters."""
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
+    organism_config = validate_organism_or_404(organism)
 
-    # Extract parameters from body
     fields_list = body.get("fields", [])
     selected_fields = fields_list if isinstance(fields_list, list) and fields_list else None
-
     limit = body.get("limit")
     offset = body.get("offset", 0)
+    order_by_fields = parse_order_by_post(body.get("orderBy", []))
 
-    # Parse orderBy - can be array of strings or array of {field, type} objects
-    order_by_raw = body.get("orderBy", [])
-    order_by_fields = []
-    if isinstance(order_by_raw, list):
-        for item in order_by_raw:
-            if isinstance(item, dict) and "field" in item:
-                # Format: {field: "date", type: "descending"}
-                field = item["field"]
-                direction = item.get("type", "ascending")  # Default to ascending
-                order_by_fields.append((field, direction))
-            elif isinstance(item, str):
-                order_by_fields.append(item)  # String means ascending by default
-    elif isinstance(order_by_raw, str):
-        order_by_fields = [order_by_raw]
-
-    # Build query
     builder = QueryBuilder(organism, organism_config)
     builder.set_order_by_fields(order_by_fields)
 
-    # Add filters (excluding special fields)
-    filter_params = {}
-    for k, v in body.items():
-        if k not in ["fields", "limit", "offset", "orderBy",
-                    "nucleotideMutations", "aminoAcidMutations",
-                    "nucleotideInsertions", "aminoAcidInsertions"]:
-            filter_params[k] = v
+    filter_params = extract_filters(
+        body,
+        exclude=[
+            "fields", "limit", "offset", "orderBy",
+            "nucleotideMutations", "aminoAcidMutations",
+            "nucleotideInsertions", "aminoAcidInsertions",
+        ],
+    )
     builder.add_filters_from_params(filter_params)
 
-    # Execute query
-    async for db in get_db():
-        query_str, params = builder.build_details_query(selected_fields, limit, offset)
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
+    query_str, params = builder.build_details_query(selected_fields, limit, offset)
+    rows = await execute_and_fetch(query_str, params)
+    data = [dict(row._mapping) for row in rows]
 
-        # Format results
-        data = [dict(row._mapping) for row in rows]
+    return {
+        "data": data,
+        "info": make_info(organism_config, "Details query"),
+    }
 
-        return {
-            "data": data,
-            "info": {
-                "dataVersion": "0",
-                "requestId": str(uuid.uuid4()),
-                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
-                "queryInfo": "Details query",
-            },
-        }
+
+# =============================================================================
+# Nucleotide sequences (aligned / unaligned)
+# =============================================================================
 
 
 @app.get("/{organism}/sample/alignedNucleotideSequences")
@@ -465,74 +505,40 @@ async def get_aligned_nucleotide_sequences(
 ):
     """
     Get aligned nucleotide sequences in FASTA or JSON format.
-
-    Examples:
-    - GET /west-nile/sample/alignedNucleotideSequences?limit=10
-    - GET /west-nile/sample/alignedNucleotideSequences?geoLocCountry=USA&limit=5
-    - GET /west-nile/sample/alignedNucleotideSequences?limit=5&dataFormat=JSON
     """
-    # Validate organism
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
+    filters = dict(request.query_params)
+    return await handle_nucleotide_sequences(
+        organism=organism,
+        request=request,
+        segment="main",
+        data_format=dataFormat,
+        limit=limit,
+        offset=offset,
+        filters=filters,
+        builder_query_fn=lambda b, seg, lim, off: b.build_sequences_query(seg, lim, off),
+        default_download_name=f"{organism}_sequences",
+    )
 
-    # Build query using QueryBuilder
-    builder = QueryBuilder(organism, organism_config)
-    query_params = dict(request.query_params)
-    builder.add_filters_from_params(query_params)
 
-    # Build sequences query
-    query_str, params = builder.build_sequences_query("main", limit, offset)
+@app.post("/{organism}/sample/alignedNucleotideSequences")
+async def post_aligned_nucleotide_sequences(organism: str, request: Request, body: dict = {}):
+    """POST version of aligned nucleotide sequences endpoint - accepts JSON body with query parameters."""
+    limit = body.get("limit")
+    offset = body.get("offset", 0)
+    data_format = body.get("dataFormat", "FASTA")
+    filters = extract_filters(body, exclude=["limit", "offset", "dataFormat"])
 
-    # Execute query
-    async for db in get_db():
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
-
-        # Decompress sequences
-        compression = request.app.state.compression
-        sequences = []
-
-        for row in rows:
-            accession_version = f"{row.accession}.{row.version}"
-            compressed_seq = row.compressed_seq
-
-            if not compressed_seq:
-                continue
-
-            try:
-                # Decompress sequence
-                sequence = compression.decompress_nucleotide_sequence(
-                    compressed_seq, organism, "main"
-                )
-                sequences.append({
-                    "accessionVersion": accession_version,
-                    "sequence": sequence
-                })
-            except Exception as e:
-                print(f"Error decompressing {accession_version}: {e}")
-                continue
-
-        # Return based on dataFormat
-        if dataFormat.upper() == "JSON":
-            # Return JSON array with accessionVersion and main (segment name)
-            json_data = [
-                {
-                    "accessionVersion": seq["accessionVersion"],
-                    "main": seq["sequence"]
-                }
-                for seq in sequences
-            ]
-            return JSONResponse(content=json_data)
-        else:
-            # Return FASTA format
-            fasta_lines = []
-            for seq in sequences:
-                fasta_lines.append(f">{seq['accessionVersion']}")
-                fasta_lines.append(seq["sequence"])
-            fasta_content = "\n".join(fasta_lines)
-            return Response(content=fasta_content, media_type="text/x-fasta")
+    return await handle_nucleotide_sequences(
+        organism=organism,
+        request=request,
+        segment="main",
+        data_format=data_format,
+        limit=limit,
+        offset=offset,
+        filters=filters,
+        builder_query_fn=lambda b, seg, lim, off: b.build_sequences_query(seg, lim, off),
+        default_download_name=f"{organism}_sequences",
+    )
 
 
 @app.get("/{organism}/sample/unalignedNucleotideSequences")
@@ -547,314 +553,71 @@ async def get_unaligned_nucleotide_sequences(
 ):
     """
     Get unaligned nucleotide sequences in FASTA or JSON format.
-
-    Examples:
-    - GET /west-nile/sample/unalignedNucleotideSequences?limit=10
-    - GET /west-nile/sample/unalignedNucleotideSequences?geoLocCountry=USA&limit=5
-    - GET /west-nile/sample/unalignedNucleotideSequences?limit=5&dataFormat=JSON
     """
-    # Validate organism
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
-
-    # Build query using QueryBuilder
-    builder = QueryBuilder(organism, organism_config)
-    query_params = dict(request.query_params)
-    builder.add_filters_from_params(query_params)
-
-    # Build sequences query - unaligned sequences are in unalignedNucleotideSequences
-    query_str, params = builder.build_unaligned_sequences_query("main", limit, offset)
-
-    # Execute query
-    async for db in get_db():
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
-
-        # Decompress sequences
-        compression = request.app.state.compression
-        sequences = []
-
-        for row in rows:
-            accession_version = f"{row.accession}.{row.version}"
-            compressed_seq = row.compressed_seq
-
-            if not compressed_seq:
-                continue
-
-            try:
-                # Decompress sequence
-                sequence = compression.decompress_nucleotide_sequence(
-                    compressed_seq, organism, "main"
-                )
-                sequences.append({
-                    "accessionVersion": accession_version,
-                    "sequence": sequence
-                })
-            except Exception as e:
-                print(f"Error decompressing {accession_version}: {e}")
-                continue
-
-        # Return based on dataFormat
-        if dataFormat.upper() == "JSON":
-            # Return JSON array with accessionVersion and main (segment name)
-            json_data = [
-                {
-                    "accessionVersion": seq["accessionVersion"],
-                    "main": seq["sequence"]
-                }
-                for seq in sequences
-            ]
-            response = JSONResponse(content=json_data)
-        else:
-            # Return FASTA format
-            fasta_lines = []
-            for seq in sequences:
-                fasta_lines.append(f">{seq['accessionVersion']}")
-                fasta_lines.append(seq["sequence"])
-            fasta_content = "\n".join(fasta_lines)
-            response = Response(content=fasta_content, media_type="text/x-fasta")
-
-        # Add Content-Disposition header if downloadAsFile is true
-        if downloadAsFile:
-            filename = downloadFileBasename if downloadFileBasename else f"{organism}_sequences"
-            # Add appropriate extension based on format
-            if dataFormat.upper() == "JSON":
-                filename += ".json"
-            else:
-                filename += ".fasta"
-            response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
-
-        return response
+    filters = dict(request.query_params)
+    resp = await handle_nucleotide_sequences(
+        organism=organism,
+        request=request,
+        segment="main",
+        data_format=dataFormat,
+        limit=limit,
+        offset=offset,
+        filters=filters,
+        builder_query_fn=lambda b, seg, lim, off: b.build_unaligned_sequences_query(seg, lim, off),
+        default_download_name=f"{organism}_sequences",
+        download_as_file=downloadAsFile,
+        download_basename=downloadFileBasename,
+    )
+    return resp
 
 
 @app.post("/{organism}/sample/unalignedNucleotideSequences")
 async def post_unaligned_nucleotide_sequences(organism: str, request: Request, body: dict = {}):
     """POST version of unaligned nucleotide sequences endpoint - accepts JSON body with query parameters."""
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
-
-    # Extract parameters from body
     limit = body.get("limit")
     offset = body.get("offset", 0)
     data_format = body.get("dataFormat", "FASTA")
+    filters = extract_filters(body, exclude=["limit", "offset", "dataFormat"])
 
-    # Build query using QueryBuilder
-    builder = QueryBuilder(organism, organism_config)
-
-    # Add filters (excluding special fields)
-    filter_params = {}
-    for k, v in body.items():
-        if k not in ["limit", "offset", "dataFormat"]:
-            filter_params[k] = v
-    builder.add_filters_from_params(filter_params)
-
-    # Build sequences query
-    query_str, params = builder.build_unaligned_sequences_query("main", limit, offset)
-
-    # Execute query
-    async for db in get_db():
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
-
-        # Decompress sequences
-        compression = request.app.state.compression
-        sequences = []
-
-        for row in rows:
-            accession_version = f"{row.accession}.{row.version}"
-            compressed_seq = row.compressed_seq
-
-            if not compressed_seq:
-                continue
-
-            try:
-                # Decompress sequence
-                sequence = compression.decompress_nucleotide_sequence(
-                    compressed_seq, organism, "main"
-                )
-                sequences.append({
-                    "accessionVersion": accession_version,
-                    "sequence": sequence
-                })
-            except Exception as e:
-                print(f"Error decompressing {accession_version}: {e}")
-                continue
-
-        # Return based on dataFormat
-        if data_format.upper() == "JSON":
-            # Return JSON array with accessionVersion and main (segment name)
-            json_data = [
-                {
-                    "accessionVersion": seq["accessionVersion"],
-                    "main": seq["sequence"]
-                }
-                for seq in sequences
-            ]
-            return JSONResponse(content=json_data)
-        else:
-            # Return FASTA format
-            fasta_lines = []
-            for seq in sequences:
-                fasta_lines.append(f">{seq['accessionVersion']}")
-                fasta_lines.append(seq["sequence"])
-            fasta_content = "\n".join(fasta_lines)
-            return Response(content=fasta_content, media_type="text/x-fasta")
+    return await handle_nucleotide_sequences(
+        organism=organism,
+        request=request,
+        segment="main",
+        data_format=data_format,
+        limit=limit,
+        offset=offset,
+        filters=filters,
+        builder_query_fn=lambda b, seg, lim, off: b.build_unaligned_sequences_query(seg, lim, off),
+        default_download_name=f"{organism}_sequences",
+    )
 
 
 @app.post("/{organism}/sample/unalignedNucleotideSequences/{segment}")
-async def post_unaligned_nucleotide_sequences_segment(organism: str, segment: str, request: Request, body: dict = {}):
+async def post_unaligned_nucleotide_sequences_segment(
+    organism: str, segment: str, request: Request, body: dict = {}
+):
     """POST version of unaligned nucleotide sequences endpoint with segment parameter."""
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
-
-    # Extract parameters from body
     limit = body.get("limit")
     offset = body.get("offset", 0)
     data_format = body.get("dataFormat", "FASTA")
+    filters = extract_filters(body, exclude=["limit", "offset", "dataFormat"])
 
-    # Build query using QueryBuilder
-    builder = QueryBuilder(organism, organism_config)
-
-    # Add filters (excluding special fields)
-    filter_params = {}
-    for k, v in body.items():
-        if k not in ["limit", "offset", "dataFormat"]:
-            filter_params[k] = v
-    builder.add_filters_from_params(filter_params)
-
-    # Build sequences query for the specified segment
-    query_str, params = builder.build_unaligned_sequences_query(segment, limit, offset)
-
-    # Execute query
-    async for db in get_db():
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
-
-        # Decompress sequences
-        compression = request.app.state.compression
-        sequences = []
-
-        for row in rows:
-            accession_version = f"{row.accession}.{row.version}"
-            compressed_seq = row.compressed_seq
-
-            if not compressed_seq:
-                continue
-
-            try:
-                # Decompress sequence
-                sequence = compression.decompress_nucleotide_sequence(
-                    compressed_seq, organism, segment
-                )
-                sequences.append({
-                    "accessionVersion": accession_version,
-                    "sequence": sequence
-                })
-            except Exception as e:
-                print(f"Error decompressing {accession_version}: {e}")
-                continue
-
-        # Return based on dataFormat
-        if data_format.upper() == "JSON":
-            # Return JSON array with accessionVersion and segment name
-            json_data = [
-                {
-                    "accessionVersion": seq["accessionVersion"],
-                    segment: seq["sequence"]
-                }
-                for seq in sequences
-            ]
-            return JSONResponse(content=json_data)
-        else:
-            # Return FASTA format
-            fasta_lines = []
-            for seq in sequences:
-                fasta_lines.append(f">{seq['accessionVersion']}")
-                fasta_lines.append(seq["sequence"])
-            fasta_content = "\n".join(fasta_lines)
-            return Response(content=fasta_content, media_type="text/x-fasta")
+    return await handle_nucleotide_sequences(
+        organism=organism,
+        request=request,
+        segment=segment,
+        data_format=data_format,
+        limit=limit,
+        offset=offset,
+        filters=filters,
+        builder_query_fn=lambda b, seg, lim, off: b.build_unaligned_sequences_query(seg, lim, off),
+        default_download_name=f"{organism}_sequences",
+    )
 
 
-@app.post("/{organism}/sample/alignedNucleotideSequences")
-async def post_aligned_nucleotide_sequences(organism: str, request: Request, body: dict = {}):
-    """POST version of aligned nucleotide sequences endpoint - accepts JSON body with query parameters."""
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
-
-    # Extract parameters from body
-    limit = body.get("limit")
-    offset = body.get("offset", 0)
-    data_format = body.get("dataFormat", "FASTA")
-
-    # Build query using QueryBuilder
-    builder = QueryBuilder(organism, organism_config)
-
-    # Add filters (excluding special fields)
-    filter_params = {}
-    for k, v in body.items():
-        if k not in ["limit", "offset", "dataFormat"]:
-            filter_params[k] = v
-    builder.add_filters_from_params(filter_params)
-
-    # Build sequences query
-    query_str, params = builder.build_sequences_query("main", limit, offset)
-
-    # Execute query
-    async for db in get_db():
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
-
-        # Decompress sequences
-        compression = request.app.state.compression
-        sequences = []
-
-        for row in rows:
-            accession_version = f"{row.accession}.{row.version}"
-            compressed_seq = row.compressed_seq
-
-            if not compressed_seq:
-                continue
-
-            try:
-                # Decompress sequence
-                sequence = compression.decompress_nucleotide_sequence(
-                    compressed_seq, organism, "main"
-                )
-                sequences.append({
-                    "accessionVersion": accession_version,
-                    "sequence": sequence
-                })
-            except Exception as e:
-                print(f"Error decompressing {accession_version}: {e}")
-                continue
-
-        # Return based on dataFormat
-        if data_format.upper() == "JSON":
-            # Return JSON array with accessionVersion and main (segment name)
-            json_data = [
-                {
-                    "accessionVersion": seq["accessionVersion"],
-                    "main": seq["sequence"]
-                }
-                for seq in sequences
-            ]
-            return JSONResponse(content=json_data)
-        else:
-            # Return FASTA format
-            fasta_lines = []
-            for seq in sequences:
-                fasta_lines.append(f">{seq['accessionVersion']}")
-                fasta_lines.append(seq["sequence"])
-            fasta_content = "\n".join(fasta_lines)
-            return Response(content=fasta_content, media_type="text/x-fasta")
+# =============================================================================
+# Amino Acid sequences (aligned)
+# =============================================================================
 
 
 @app.get("/{organism}/sample/alignedAminoAcidSequences/{gene}")
@@ -868,74 +631,17 @@ async def get_aligned_amino_acid_sequences(
 ):
     """
     Get aligned amino acid sequences in FASTA or JSON format.
-
-    Examples:
-    - GET /west-nile/sample/alignedAminoAcidSequences/2K?limit=10
-    - GET /west-nile/sample/alignedAminoAcidSequences/2K?geoLocCountry=USA&limit=5
-    - GET /west-nile/sample/alignedAminoAcidSequences/2K?limit=5&dataFormat=JSON
     """
-    # Validate organism
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
-
-    # Build query using QueryBuilder
-    builder = QueryBuilder(organism, organism_config)
-    query_params = dict(request.query_params)
-    builder.add_filters_from_params(query_params)
-
-    # Build amino acid sequences query
-    query_str, params = builder.build_amino_acid_sequences_query(gene, limit, offset)
-
-    # Execute query
-    async for db in get_db():
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
-
-        # Decompress sequences
-        compression = request.app.state.compression
-        sequences = []
-
-        for row in rows:
-            accession_version = f"{row.accession}.{row.version}"
-            compressed_seq = row.compressed_seq
-
-            if not compressed_seq:
-                continue
-
-            try:
-                # Decompress amino acid sequence
-                sequence = compression.decompress_amino_acid_sequence(
-                    compressed_seq, organism, gene
-                )
-                sequences.append({
-                    "accessionVersion": accession_version,
-                    "sequence": sequence
-                })
-            except Exception as e:
-                print(f"Error decompressing {accession_version}: {e}")
-                continue
-
-        # Return based on dataFormat
-        if dataFormat.upper() == "JSON":
-            # Return JSON array with accessionVersion and gene name
-            json_data = [
-                {
-                    "accessionVersion": seq["accessionVersion"],
-                    gene: seq["sequence"]
-                }
-                for seq in sequences
-            ]
-            return JSONResponse(content=json_data)
-        else:
-            # Return FASTA format
-            fasta_lines = []
-            for seq in sequences:
-                fasta_lines.append(f">{seq['accessionVersion']}")
-                fasta_lines.append(seq["sequence"])
-            fasta_content = "\n".join(fasta_lines)
-            return Response(content=fasta_content, media_type="text/x-fasta")
+    filters = dict(request.query_params)
+    return await handle_amino_acid_sequences(
+        organism=organism,
+        request=request,
+        gene=gene,
+        data_format=dataFormat,
+        limit=limit,
+        offset=offset,
+        filters=filters,
+    )
 
 
 @app.post("/{organism}/sample/alignedAminoAcidSequences/{gene}")
@@ -948,80 +654,26 @@ async def post_aligned_amino_acid_sequences(
     """
     POST endpoint for aligned amino acid sequences.
     Accepts JSON body with query parameters including filters, limit, offset, and dataFormat.
-
-    Examples:
-    - POST /ebola-sudan/sample/alignedAminoAcidSequences/VP35
-      Body: {"accessionVersion": "LOC_00004T9.1", "dataFormat": "FASTA"}
     """
-    # Validate organism
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
-
-    # Extract limit, offset, dataFormat from body
     limit = body.get("limit")
     offset = body.get("offset", 0)
     data_format = body.get("dataFormat", "FASTA")
+    filters = dict(body)
 
-    # Build query using QueryBuilder
-    builder = QueryBuilder(organism, organism_config)
-    builder.add_filters_from_params(body)
-
-    # Build amino acid sequences query
-    query_str, params = builder.build_amino_acid_sequences_query(gene, limit, offset)
-
-    # Execute query
-    async for db in get_db():
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
-
-        # Decompress sequences
-        compression = request.app.state.compression
-        sequences = []
-
-        for row in rows:
-            accession_version = f"{row.accession}.{row.version}"
-            compressed_seq = row.compressed_seq
-
-            if not compressed_seq:
-                continue
-
-            try:
-                # Decompress amino acid sequence
-                sequence = compression.decompress_amino_acid_sequence(
-                    compressed_seq, organism, gene
-                )
-                sequences.append({
-                    "accessionVersion": accession_version,
-                    "sequence": sequence
-                })
-            except Exception as e:
-                print(f"Error decompressing {accession_version}: {e}")
-                continue
-
-        # Return based on dataFormat
-        if data_format.upper() == "JSON":
-            # Return JSON array with accessionVersion and gene name
-            json_data = [
-                {
-                    "accessionVersion": seq["accessionVersion"],
-                    gene: seq["sequence"]
-                }
-                for seq in sequences
-            ]
-            return JSONResponse(content=json_data)
-        else:
-            # Return FASTA format
-            fasta_lines = []
-            for seq in sequences:
-                fasta_lines.append(f">{seq['accessionVersion']}")
-                fasta_lines.append(seq["sequence"])
-            fasta_content = "\n".join(fasta_lines)
-            return Response(content=fasta_content, media_type="text/x-fasta")
+    return await handle_amino_acid_sequences(
+        organism=organism,
+        request=request,
+        gene=gene,
+        data_format=data_format,
+        limit=limit,
+        offset=offset,
+        filters=filters,
+    )
 
 
-# ===== MUTATION ENDPOINTS =====
+# =============================================================================
+# Insertions (Nucleotide / Amino Acid)
+# =============================================================================
 
 
 @app.post("/{organism}/sample/nucleotideInsertions")
@@ -1031,33 +683,31 @@ async def post_nucleotide_insertions(organism: str, body: dict = {}):
 
     Returns list of insertions with counts, positions, and inserted symbols.
     """
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
+    organism_config = validate_organism_or_404(organism)
 
     # Build query to get all insertions from matching sequences
     builder = QueryBuilder(organism, organism_config)
 
     # Add filters from body (excluding special fields)
-    filter_params = {}
+    filter_params: Dict[str, Any] = {}
     for k, v in body.items():
-        if k not in ["fields", "limit", "offset", "orderBy",
-                    "nucleotideMutations", "aminoAcidMutations",
-                    "nucleotideInsertions", "aminoAcidInsertions"]:
+        if k not in [
+            "fields", "limit", "offset", "orderBy",
+            "nucleotideMutations", "aminoAcidMutations",
+            "nucleotideInsertions", "aminoAcidInsertions",
+        ]:
             if k == "isRevocation":
-                filter_params["is_revocation"] = v if isinstance(v, bool) else v.lower() == "true"
+                filter_params["is_revocation"] = v if isinstance(v, bool) else str(v).lower() == "true"
             else:
                 filter_params[k] = v
     builder.add_filters_from_params(filter_params)
 
     # Use query builder to build a filtered CTE, then expand insertions
-    # This ensures computed fields like accessionVersion work correctly
-    from querulus.query_builder import FIELD_DEFINITIONS
+    from querulus.query_builder import FIELD_DEFINITIONS, BASE_TABLE
 
     # Separate simple and computed filters
-    simple_filters = []
-    computed_filters = []
+    simple_filters: List[Tuple[str, Any]] = []
+    computed_filters: List[Tuple[str, Any]] = []
     for field, value in builder.filters.items():
         base_field = field.rstrip("From").rstrip("To")
         if base_field in FIELD_DEFINITIONS and FIELD_DEFINITIONS[base_field].requires_cte:
@@ -1065,33 +715,27 @@ async def post_nucleotide_insertions(organism: str, body: dict = {}):
         else:
             simple_filters.append((field, value))
 
-    params = {"organism": organism}
+    params: Dict[str, Any] = {"organism": organism}
 
     if computed_filters:
         # Need CTE for computed field filtering
-        # First, build CTE with computed fields
         filter_base_fields = [field.rstrip("From").rstrip("To") for field, _ in computed_filters]
-        from querulus.query_builder import BASE_TABLE
 
         select_parts = []
         for field in filter_base_fields:
             if field in FIELD_DEFINITIONS:
                 select_parts.append(FIELD_DEFINITIONS[field].select_sql(builder))
-
         select_parts.append("joint_metadata -> 'nucleotideInsertions' as insertions_all_segments")
         select_clause = ",\n            ".join(select_parts)
 
-        # Build WHERE clauses for CTE (simple filters only)
+        # WHERE for CTE (simple filters only)
         cte_where_clauses = []
         for field, value in simple_filters:
             param_name = f"filter_{field.replace('.', '_')}"
             base_field = field.rstrip("From").rstrip("To")
-
-            # Use query builder to get the field expression
             field_def = builder._field_definition(base_field)
             filter_expr = field_def.filter_sql(builder)
 
-            # Determine operator
             if field.endswith("From"):
                 op = ">="
             elif field.endswith("To"):
@@ -1102,30 +746,23 @@ async def post_nucleotide_insertions(organism: str, body: dict = {}):
             cte_where_clauses.append(f"{filter_expr} {op} :{param_name}")
             params[param_name] = builder._convert_param_value(value, base_field)
 
-        cte_where = ""
-        if cte_where_clauses:
-            cte_where = " AND " + " AND ".join(cte_where_clauses)
+        cte_where = f" AND {' AND '.join(cte_where_clauses)}" if cte_where_clauses else ""
 
-        # Build WHERE clauses for outer query (computed filters)
+        # WHERE for outer query (computed filters)
         outer_where_clauses = []
         for field, value in computed_filters:
             base_field = field.rstrip("From").rstrip("To")
             param_name = f"filter_{field.replace('.', '_')}"
-
-            # Determine operator
             if field.endswith("From"):
                 op = ">="
             elif field.endswith("To"):
                 op = "<="
             else:
                 op = "="
-
             outer_where_clauses.append(f'"{base_field}" {op} :{param_name}')
             params[param_name] = value
 
-        outer_where = ""
-        if outer_where_clauses:
-            outer_where = "WHERE " + " AND ".join(outer_where_clauses)
+        outer_where = f"WHERE {' AND '.join(outer_where_clauses)}" if outer_where_clauses else ""
 
         query_str = f"""
             WITH filtered_sequences AS (
@@ -1178,12 +815,9 @@ async def post_nucleotide_insertions(organism: str, body: dict = {}):
         for field, value in simple_filters:
             param_name = f"filter_{field.replace('.', '_')}"
             base_field = field.rstrip("From").rstrip("To")
-
-            # Use query builder to get the field expression
             field_def = builder._field_definition(base_field)
             filter_expr = field_def.filter_sql(builder)
 
-            # Determine operator
             if field.endswith("From"):
                 op = ">="
             elif field.endswith("To"):
@@ -1194,12 +828,8 @@ async def post_nucleotide_insertions(organism: str, body: dict = {}):
             where_clauses.append(f"{filter_expr} {op} :{param_name}")
             params[param_name] = builder._convert_param_value(value, base_field)
 
-        where_clause = ""
-        if where_clauses:
-            where_clause = " AND " + " AND ".join(where_clauses)
+        where_clause = f" AND {' AND '.join(where_clauses)}" if where_clauses else ""
 
-        # Query to aggregate insertions from all segments
-        # The insertions are stored as {"segment_name": ["position:sequence", ...], ...}
         query_str = f"""
             WITH segments_expanded AS (
                 SELECT
@@ -1236,30 +866,22 @@ async def post_nucleotide_insertions(organism: str, body: dict = {}):
             ORDER BY count DESC, position ASC
         """
 
-    async for db in get_db():
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
-
-        # Format results
-        data = []
-        for row in rows:
-            data.append({
-                "insertion": row.insertion,
-                "count": row.count,
-                "insertedSymbols": row.inserted_symbols,
-                "position": row.position,
-                "sequenceName": row.sequence_name
-            })
-
-        return {
-            "data": data,
-            "info": {
-                "dataVersion": "0",
-                "requestId": str(uuid.uuid4()),
-                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
-                "queryInfo": "Nucleotide insertions query"
-            }
+    rows = await execute_and_fetch(query_str, params)
+    data = [
+        {
+            "insertion": row.insertion,
+            "count": row.count,
+            "insertedSymbols": row.inserted_symbols,
+            "position": row.position,
+            "sequenceName": row.sequence_name,
         }
+        for row in rows
+    ]
+
+    return {
+        "data": data,
+        "info": make_info(organism_config, "Nucleotide insertions query"),
+    }
 
 
 @app.post("/{organism}/sample/aminoAcidInsertions")
@@ -1269,42 +891,35 @@ async def post_amino_acid_insertions(organism: str, body: dict = {}):
 
     Returns list of insertions with counts, positions, gene names, and inserted symbols.
     """
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
+    organism_config = validate_organism_or_404(organism)
 
-    # Build query to get all insertions from matching sequences
     builder = QueryBuilder(organism, organism_config)
 
     # Add filters from body (excluding special fields)
-    filter_params = {}
+    filter_params: Dict[str, Any] = {}
     for k, v in body.items():
-        if k not in ["fields", "limit", "offset", "orderBy",
-                    "nucleotideMutations", "aminoAcidMutations",
-                    "nucleotideInsertions", "aminoAcidInsertions"]:
+        if k not in [
+            "fields", "limit", "offset", "orderBy",
+            "nucleotideMutations", "aminoAcidMutations",
+            "nucleotideInsertions", "aminoAcidInsertions",
+        ]:
             if k == "isRevocation":
-                filter_params["is_revocation"] = v if isinstance(v, bool) else v.lower() == "true"
+                filter_params["is_revocation"] = v if isinstance(v, bool) else str(v).lower() == "true"
             else:
                 filter_params[k] = v
     builder.add_filters_from_params(filter_params)
 
-    # Build query to get insertions from all genes
     params = {"organism": organism}
 
-    # Build WHERE clause for filters
+    # Build WHERE clause for filters (preserve original behavior)
     where_clauses = []
     for field, value in builder.filters.items():
         param_name = f"filter_{field}"
         where_clauses.append(f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}")
         params[param_name] = value
 
-    where_clause = ""
-    if where_clauses:
-        where_clause = " AND " + " AND ".join(where_clauses)
+    where_clause = f" AND {' AND '.join(where_clauses)}" if where_clauses else ""
 
-    # Query to aggregate amino acid insertions across all genes
-    # The insertions are stored as {"gene1": ["position:sequence", ...], "gene2": [...]}
     query_str = f"""
         WITH gene_insertions AS (
             SELECT
@@ -1336,109 +951,78 @@ async def post_amino_acid_insertions(organism: str, body: dict = {}):
         ORDER BY count DESC, gene ASC, position ASC
     """
 
-    async for db in get_db():
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
-
-        # Format results
-        data = []
-        for row in rows:
-            data.append({
-                "insertion": row.insertion,
-                "count": row.count,
-                "insertedSymbols": row.inserted_symbols,
-                "position": row.position,
-                "sequenceName": row.sequence_name
-            })
-
-        return {
-            "data": data,
-            "info": {
-                "dataVersion": "0",
-                "requestId": str(uuid.uuid4()),
-                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
-                "queryInfo": "Amino acid insertions query"
-            }
+    rows = await execute_and_fetch(query_str, params)
+    data = [
+        {
+            "insertion": row.insertion,
+            "count": row.count,
+            "insertedSymbols": row.inserted_symbols,
+            "position": row.position,
+            "sequenceName": row.sequence_name,
         }
+        for row in rows
+    ]
+
+    return {
+        "data": data,
+        "info": make_info(organism_config, "Amino acid insertions query"),
+    }
+
+
+# =============================================================================
+# Mutations (Nucleotide / Amino Acid)
+# =============================================================================
+
+
+async def _aligned_sequences_metadata(organism: str, params: Mapping[str, Any], request: Request):
+    organism_config = validate_organism_or_404(organism)
+    builder = QueryBuilder(organism, organism_config)
+    builder.add_filters_from_params(dict(params))
+    query_str, qparams = builder.build_aligned_sequences_metadata_query(limit=None, offset=0)
+    rows = await execute_and_fetch(query_str, qparams)
+    return organism_config, rows
 
 
 @app.get("/{organism}/sample/nucleotideMutations")
-async def get_nucleotide_mutations(
-    organism: str,
-    request: Request,
-):
+async def get_nucleotide_mutations(organism: str, request: Request):
     """Get nucleotide mutations for matching sequences"""
-    # Validate organism
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
+    organism_config, rows = await _aligned_sequences_metadata(organism, request.query_params, request)
 
-    # Build query using QueryBuilder for proper filter handling
-    builder = QueryBuilder(organism, organism_config)
-    query_params = dict(request.query_params)
-    builder.add_filters_from_params(query_params)
+    all_mutations: List[Dict[str, Any]] = []
+    compression = request.app.state.compression
 
-    # Use the new aligned sequences metadata query
-    query_str, params = builder.build_aligned_sequences_metadata_query(limit=None, offset=0)
-
-    async for db in get_db():
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
-
-        # Calculate mutations for each sequence
-        all_mutations = []
-        compression = request.app.state.compression
-
-        for row in rows:
-            # Get nucleotide sequences
-            aligned_sequences = row.aligned_sequences or {}
-
-            for segment_name, seq_data in aligned_sequences.items():
-                if not seq_data or 'compressedSequence' not in seq_data:
+    for row in rows:
+        aligned_sequences = row.aligned_sequences or {}
+        for segment_name, seq_data in aligned_sequences.items():
+            if not seq_data or "compressedSequence" not in seq_data:
+                continue
+            try:
+                sequence = compression.decompress_nucleotide_sequence(
+                    seq_data["compressedSequence"], organism, segment_name
+                )
+                reference_seq = organism_config.referenceGenome.get_nucleotide_sequence(segment_name)
+                if not reference_seq:
                     continue
+                for i, (ref_base, seq_base) in enumerate(zip(reference_seq, sequence)):
+                    if ref_base != seq_base and seq_base != "N":
+                        position = i + 1
+                        all_mutations.append({
+                            "mutation": f"{ref_base}{position}{seq_base}",
+                            "mutationFrom": ref_base,
+                            "mutationTo": seq_base,
+                            "position": position,
+                            "sequenceName": None,
+                            "count": 1,
+                            "coverage": 1,
+                            "proportion": 1.0,
+                        })
+            except Exception as e:
+                logger.error(f"Error calculating mutations for {row.accession}.{row.version}: {e}")
 
-                # Decompress sequence
-                try:
-                    sequence = compression.decompress_nucleotide_sequence(
-                        seq_data['compressedSequence'],
-                        organism,
-                        segment_name
-                    )
-
-                    # Get reference sequence to compare
-                    reference_seq = organism_config.referenceGenome.get_nucleotide_sequence(segment_name)
-                    if not reference_seq:
-                        continue
-
-                    # Calculate mutations by comparing to reference
-                    for i, (ref_base, seq_base) in enumerate(zip(reference_seq, sequence)):
-                        if ref_base != seq_base and seq_base != 'N':  # Ignore N's (unknown)
-                            position = i + 1  # 1-indexed
-                            all_mutations.append({
-                                "mutation": f"{ref_base}{position}{seq_base}",
-                                "mutationFrom": ref_base,
-                                "mutationTo": seq_base,
-                                "position": position,
-                                "sequenceName": None,  # nucleotide mutations don't have sequence name
-                                "count": 1,
-                                "coverage": 1,
-                                "proportion": 1.0
-                            })
-
-                except Exception as e:
-                    logger.error(f"Error calculating mutations for {row.accession}.{row.version}: {e}")
-                    continue
-
-        return {
-            "data": all_mutations,
-            "info": {
-                "dataVersion": "0",
-                "requestId": str(uuid.uuid4()),
-                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
-                "queryInfo": "Nucleotide mutations query"
-            }
-        }
+    return {
+        "data": all_mutations,
+        "info": make_info(organism_config, "Nucleotide mutations query"),
+    }
 
 
 @app.post("/{organism}/sample/nucleotideMutations")
@@ -1447,98 +1031,52 @@ async def post_nucleotide_mutations(
     request: Request,
     body: dict = Body({}),
 ):
-    """POST version of nucleotide mutations endpoint"""
-    # Merge query params and body params
-    params_dict = dict(request.query_params)
-    if body:
-        params_dict.update(body)
-
-    # Build new request with combined params
-    class FakeRequest:
-        def __init__(self, params, app_state):
-            self.query_params = params
-            self.app = type('obj', (object,), {'state': app_state})()
-
-    fake_request = FakeRequest(params_dict, request.app.state)
-    return await get_nucleotide_mutations(organism, fake_request)
+    """POST version of nucleotide mutations endpoint (preserves GET behavior)."""
+    merged = dict(request.query_params)
+    merged.update(body or {})
+    return await get_nucleotide_mutations(organism, type("FakeReq", (), {"query_params": merged, "app": request.app})())
 
 
 @app.get("/{organism}/sample/aminoAcidMutations")
-async def get_amino_acid_mutations(
-    organism: str,
-    request: Request,
-):
+async def get_amino_acid_mutations(organism: str, request: Request):
     """Get amino acid mutations for matching sequences"""
-    # Validate organism
-    try:
-        organism_config = config.get_organism_config(organism)
-    except ValueError as e:
-        return JSONResponse(status_code=404, content={"error": str(e)})
+    organism_config, rows = await _aligned_sequences_metadata(organism, request.query_params, request)
 
-    # Build query using QueryBuilder for proper filter handling
-    builder = QueryBuilder(organism, organism_config)
-    query_params = dict(request.query_params)
-    builder.add_filters_from_params(query_params)
+    all_mutations: List[Dict[str, Any]] = []
+    compression = request.app.state.compression
 
-    # Use the new aligned sequences metadata query
-    query_str, params = builder.build_aligned_sequences_metadata_query(limit=None, offset=0)
-
-    async for db in get_db():
-        result = await db.execute(text(query_str), params)
-        rows = result.fetchall()
-
-        # Calculate mutations for each sequence
-        all_mutations = []
-        compression = request.app.state.compression
-
-        for row in rows:
-            # Get amino acid sequences
-            aa_sequences = row.amino_acid_sequences or {}
-
-            for gene_name, seq_data in aa_sequences.items():
-                if not seq_data or 'compressedSequence' not in seq_data:
+    for row in rows:
+        aa_sequences = row.amino_acid_sequences or {}
+        for gene_name, seq_data in aa_sequences.items():
+            if not seq_data or "compressedSequence" not in seq_data:
+                continue
+            try:
+                sequence = compression.decompress_amino_acid_sequence(
+                    seq_data["compressedSequence"], organism, gene_name
+                )
+                reference_seq = organism_config.referenceGenome.get_gene_sequence(gene_name)
+                if not reference_seq:
                     continue
 
-                # Decompress sequence
-                try:
-                    sequence = compression.decompress_amino_acid_sequence(
-                        seq_data['compressedSequence'],
-                        organism,
-                        gene_name
-                    )
+                for i, (ref_aa, seq_aa) in enumerate(zip(reference_seq, sequence)):
+                    if ref_aa != seq_aa and seq_aa != "X":
+                        all_mutations.append({
+                            "mutation": f"{gene_name}:{ref_aa}{i+1}{seq_aa}",
+                            "mutationFrom": ref_aa,
+                            "mutationTo": seq_aa,
+                            "position": i + 1,
+                            "count": 1,
+                            "coverage": 1,
+                            "proportion": 1.0,
+                            "sequenceName": gene_name,
+                        })
+            except Exception as e:
+                logger.error(f"Error processing {gene_name} for {row.accession}.{row.version}: {e}")
 
-                    # Get reference sequence to compare
-                    reference_seq = organism_config.referenceGenome.get_gene_sequence(gene_name)
-                    if not reference_seq:
-                        continue
-
-                    # Calculate mutations by comparing to reference
-                    for i, (ref_aa, seq_aa) in enumerate(zip(reference_seq, sequence)):
-                        if ref_aa != seq_aa and seq_aa != 'X':  # Ignore X's (unknown)
-                            mutation_str = f"{gene_name}:{ref_aa}{i+1}{seq_aa}"
-                            all_mutations.append({
-                                "mutation": mutation_str,
-                                "mutationFrom": ref_aa,
-                                "mutationTo": seq_aa,
-                                "position": i + 1,
-                                "count": 1,
-                                "coverage": 1,
-                                "proportion": 1.0,
-                                "sequenceName": gene_name
-                            })
-                except Exception as e:
-                    logger.error(f"Error processing {gene_name} for {row.accession}.{row.version}: {e}")
-                    continue
-
-        return {
-            "data": all_mutations,
-            "info": {
-                "dataVersion": "0",
-                "requestId": str(uuid.uuid4()),
-                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
-                "queryInfo": "Amino acid mutations query"
-            }
-        }
+    return {
+        "data": all_mutations,
+        "info": make_info(organism_config, "Amino acid mutations query"),
+    }
 
 
 @app.post("/{organism}/sample/aminoAcidMutations")
@@ -1547,21 +1085,15 @@ async def post_amino_acid_mutations(
     request: Request,
     body: dict = Body({}),
 ):
-    """POST version of amino acid mutations endpoint"""
-    # Merge query params and body params
-    params_dict = dict(request.query_params)
-    if body:
-        params_dict.update(body)
+    """POST version of amino acid mutations endpoint (preserves GET behavior)."""
+    merged = dict(request.query_params)
+    merged.update(body or {})
+    return await get_amino_acid_mutations(organism, type("FakeReq", (), {"query_params": merged, "app": request.app})())
 
-    # Build new request with combined params
-    class FakeRequest:
-        def __init__(self, params, app_state):
-            self.query_params = params
-            self.app = type('obj', (object,), {'state': app_state})()
 
-    fake_request = FakeRequest(params_dict, request.app.state)
-    return await get_amino_acid_mutations(organism, fake_request)
-
+# =============================================================================
+# Entrypoint
+# =============================================================================
 
 if __name__ == "__main__":
     import uvicorn

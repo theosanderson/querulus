@@ -13,6 +13,7 @@ class QueryBuilder:
         self.organism_config = organism_config
         self.filters: dict[str, Any] = {}
         self.group_by_fields: list[str] = []
+        self.order_by_fields: list[str] = []
 
     def add_filter(self, field: str, value: Any) -> "QueryBuilder":
         """Add a metadata filter"""
@@ -36,6 +37,65 @@ class QueryBuilder:
         """Set fields to group by"""
         self.group_by_fields = fields
         return self
+
+    def set_order_by_fields(self, fields: list[str]) -> "QueryBuilder":
+        """Set fields to order by"""
+        self.order_by_fields = fields
+        return self
+
+    def build_order_by_clause(self, context: str = "details") -> str:
+        """
+        Build ORDER BY clause based on order_by_fields.
+
+        Args:
+            context: Either "details" (for details/sequences) or "aggregated"
+
+        Returns:
+            SQL ORDER BY clause (without "ORDER BY" keyword)
+        """
+        if not self.order_by_fields:
+            # Default ordering
+            if context == "aggregated":
+                return "count DESC"
+            else:
+                return "accession"
+
+        # Computed fields that have SQL expressions
+        computed_fields_map = {
+            "accession": "accession",
+            "version": "version",
+            "accessionVersion": "accession, version",
+            "displayName": "accession, version",
+            "submittedDate": "submitted_at",
+            "submittedAtTimestamp": "EXTRACT(EPOCH FROM submitted_at)",
+            "releasedDate": "released_at",
+            "releasedAtTimestamp": "EXTRACT(EPOCH FROM released_at)",
+            "submissionId": "submission_id",
+            "submitter": "submitter",
+            "groupId": "group_id",
+            "groupName": "groups_table.name",
+            "isRevocation": "is_revocation",
+            "versionComment": "version_comment",
+            "versionStatus": "versionStatus",
+            "earliestReleaseDate": "earliestReleaseDate",
+            "dataUseTerms": "dataUseTerms",
+            "dataUseTermsRestrictedUntil": "dataUseTermsRestrictedUntil",
+            "dataUseTermsUrl": "dataUseTermsUrl",
+        }
+
+        order_parts = []
+        for field in self.order_by_fields:
+            if field == "random":
+                order_parts.append("RANDOM()")
+            elif field == "count" and context == "aggregated":
+                order_parts.append("count")
+            elif field in computed_fields_map:
+                order_parts.append(computed_fields_map[field])
+            else:
+                # Metadata field
+                order_parts.append(f"joint_metadata -> 'metadata' ->> '{field}'")
+
+        return ", ".join(order_parts) if order_parts else ("count DESC" if context == "aggregated" else "accession")
 
     def build_earliest_release_date_expression(self) -> str:
         """
@@ -373,7 +433,7 @@ class QueryBuilder:
         # Add GROUP BY if needed
         if query_needs_groupby:
             query += f"\nGROUP BY {group_by_clause}"
-            query += "\nORDER BY count DESC"
+            query += f"\nORDER BY {self.build_order_by_clause('aggregated')}"
 
             # Add pagination for grouped results
             if limit is not None:
@@ -654,7 +714,7 @@ class QueryBuilder:
                         params[param_name] = value
 
             # Add pagination
-            query += "\nORDER BY accession"
+            query += f"\nORDER BY {self.build_order_by_clause('details')}"
             if limit is not None:
                 query += f"\nLIMIT {limit}"
             if offset > 0:
@@ -749,7 +809,7 @@ class QueryBuilder:
                 params[param_name] = value
 
         # Add pagination
-        query += "\nORDER BY sequence_entries_view.accession"
+        query += f"\nORDER BY {self.build_order_by_clause('details')}"
         if limit is not None:
             query += f"\nLIMIT {limit}"
         if offset > 0:

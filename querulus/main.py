@@ -108,9 +108,15 @@ async def get_aggregated(
     if fields:
         group_by_fields = [f.strip() for f in fields.split(",")]
 
+    # Parse orderBy parameter (can appear multiple times)
+    order_by_fields = request.query_params.getlist("orderBy") if hasattr(request.query_params, "getlist") else []
+    if not order_by_fields and "orderBy" in request.query_params:
+        order_by_fields = [request.query_params["orderBy"]]
+
     # Build query using QueryBuilder
     builder = QueryBuilder(organism, organism_config)
     builder.set_group_by_fields(group_by_fields)
+    builder.set_order_by_fields(order_by_fields)
 
     # Add filters from query parameters
     # Extract all query params except special ones
@@ -181,8 +187,14 @@ async def get_details(
     if fields:
         selected_fields = [f.strip() for f in fields.split(",")]
 
+    # Parse orderBy parameter (can appear multiple times)
+    order_by_fields = request.query_params.getlist("orderBy") if hasattr(request.query_params, "getlist") else []
+    if not order_by_fields and "orderBy" in request.query_params:
+        order_by_fields = [request.query_params["orderBy"]]
+
     # Build query using QueryBuilder
     builder = QueryBuilder(organism, organism_config)
+    builder.set_order_by_fields(order_by_fields)
 
     # Add filters from query parameters
     query_params = dict(request.query_params)

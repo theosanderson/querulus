@@ -29,8 +29,8 @@ This file tracks implementation progress for the Querulus project. It should be 
 ## Current Status
 
 **Date**: 2025-10-02
-**Phase**: Phase 2 - Sequence Endpoints ✅ COMPLETE
-**Working On**: All sequence endpoints implemented and tested
+**Phase**: Phase 3 - Deployment & Integration ⏳ READY TO START
+**Working On**: orderBy support completed, ready for Docker and Kubernetes integration
 
 ### Completed Tasks
 
@@ -105,9 +105,9 @@ This file tracks implementation progress for the Querulus project. It should be 
   - groupName (with JOIN to groups_table)
   - dataUseTerms, dataUseTermsRestrictedUntil, dataUseTermsUrl
 - ✅ **Comprehensive test suite** (tests/test_lapis_compatibility.py):
-  - 17 integration tests comparing Querulus vs LAPIS
+  - 21 integration tests comparing Querulus vs LAPIS
   - All tests passing (100% success rate)
-  - Tests cover: aggregated, details, computed fields, filtering, pagination
+  - Tests cover: aggregated, details, computed fields, filtering, pagination, orderBy, sequences
   - Can be run with: `python -m pytest tests/test_lapis_compatibility.py -v`
 
 #### Bug Fixes ✅
@@ -130,29 +130,38 @@ This file tracks implementation progress for the Querulus project. It should be 
   - Pre-compiles Zstd dictionaries for each organism/segment
   - Tested successfully: decompresses 11,029 bp sequences correctly
 
-- ✅ **Nucleotide sequences endpoint** (GET /{organism}/sample/alignedNucleotideSequences):
-  - Returns FASTA format (text/x-fasta)
-  - Supports filtering, limit, offset (same as details endpoint)
-  - Decompresses sequences on-the-fly using CompressionService
+- ✅ **All sequence endpoints** (2025-10-02):
+  - `GET /{organism}/sample/alignedNucleotideSequences` - Aligned nucleotide sequences (FASTA)
+  - `GET /{organism}/sample/unalignedNucleotideSequences` - Unaligned nucleotide sequences (FASTA)
+  - `GET /{organism}/sample/alignedAminoAcidSequences/{gene}` - Amino acid sequences (FASTA)
+  - All support filtering, limit, offset, orderBy
   - FASTA headers: `>ACCESSION.VERSION`
-  - Initialized in app lifespan for reuse across requests
+  - Decompresses on-the-fly using CompressionService
+
+#### Query Features ✅
+- ✅ **orderBy support** (2025-10-02):
+  - Implemented orderBy parameter for all endpoints (aggregated, details, sequences)
+  - Supports metadata fields (e.g., `orderBy=geoLocCountry`)
+  - Supports computed fields (e.g., `orderBy=accession`, `orderBy=versionStatus`)
+  - Special values: `orderBy=random`, `orderBy=count` (aggregated only)
+  - Multiple orderBy fields supported (e.g., `orderBy=country&orderBy=accession`)
+  - Added 4 comprehensive tests (all passing)
 
 ### Current Working State
 
-**Querulus now supports metadata AND sequence queries!** 🎉
+**Querulus is feature-complete for core LAPIS functionality!** 🎉
 
 - Server running on `localhost:8000`
 - Successfully connects to PostgreSQL database
-- **Metadata endpoints**: aggregated and details fully working
-  - Returns accurate counts and metadata matching LAPIS exactly
-  - Handles multi-version sequences correctly
-  - All computed fields working (accessionVersion, timestamps, versionStatus, earliestReleaseDate)
-  - Filtering by computed fields fully supported
-  - 17/17 integration tests passing
-- **Sequence endpoints**: nucleotide sequences working
-  - Decompresses Zstandard-compressed sequences with dictionary compression
-  - Returns FASTA format
-  - Supports filtering and pagination
+- **All core endpoints implemented and tested:**
+  - ✅ Aggregated endpoint (with grouping, filtering, orderBy)
+  - ✅ Details endpoint (with field selection, filtering, orderBy)
+  - ✅ Aligned nucleotide sequences (FASTA format, with decompression)
+  - ✅ Unaligned nucleotide sequences (FASTA format, with decompression)
+  - ✅ Aligned amino acid sequences (FASTA format, with decompression)
+- **All computed fields implemented** (matching LAPIS exactly)
+- **21/21 integration tests passing** (100% success rate)
+- **Ready for deployment** - next step is Docker and Kubernetes integration
 
 ### Key Findings
 
@@ -187,38 +196,64 @@ This file tracks implementation progress for the Querulus project. It should be 
 
 ## Next Steps
 
-### Immediate (Next Session)
+### Immediate (Next Session) - HIGH PRIORITY
 
-**Phase 2 Continued: Complete Sequence Endpoints**
+**Phase 3: Docker & Kubernetes Integration**
 
-1. **Test and verify nucleotide sequences endpoint** (HIGH PRIORITY):
-   - Compare output against LAPIS for correctness
-   - Verify FASTA format matches exactly
-   - Test with various filters and pagination
-   - Add integration tests for sequences endpoint
-   - Check performance with larger datasets
+This is the TOP PRIORITY for the next session. Complete this BEFORE working on insertion endpoints or alternative formats.
 
-2. **Implement amino acid sequence endpoint**:
-   - Create `GET /{organism}/sample/alignedAminoAcidSequences/{gene}`
-   - Reuse compression service with gene dictionaries
-   - FASTA format with appropriate headers
-   - Test against LAPIS
+1. **Create Dockerfile for Querulus** (MUST DO FIRST):
+   - Base image: Python 3.12 slim
+   - Install dependencies from pyproject.toml
+   - Copy querulus package
+   - Expose port 8000
+   - CMD to run uvicorn
+   - Health check configuration
 
-3. **Implement insertion endpoints**:
+2. **Set up GitHub Actions for Docker image build**:
+   - Create `.github/workflows/docker-build.yml`
+   - Build on push to main branch
+   - Build on pull requests
+   - Push to `ghcr.io/theosanderson/querulus:latest`
+   - Tag with git sha and version
+   - Use GitHub Container Registry (ghcr.io)
+
+3. **Update Loculus Kubernetes configuration**:
+   - Add `useQuerulus` toggle to helm values (default: false)
+   - When `useQuerulus=true`:
+     - Deploy querulus deployment and service
+     - **DISABLE** lapis deployment
+     - **DISABLE** silo deployment
+     - Route API calls to querulus instead of lapis
+   - When `useQuerulus=false` (default):
+     - Keep existing lapis+silo behavior
+   - Update ingress/service routing based on toggle
+
+4. **Test deployment**:
+   - Deploy to test environment with `useQuerulus=true`
+   - Verify all endpoints work through Kubernetes
+   - Test against existing Loculus frontend
+   - Compare performance with LAPIS
+
+### Later Priorities
+
+**Additional Features** (after Docker/Kubernetes integration complete):
+
+1. **Implement insertion endpoints**:
    - `GET /{organism}/sample/nucleotideInsertions`
    - `GET /{organism}/sample/aminoAcidInsertions`
    - Parse insertions from JSONB metadata
    - Return list of insertions with positions and sequences
 
-4. **Optimize sequence streaming** (if needed):
-   - Profile memory usage during sequence decompression
-   - Consider streaming responses for very large result sets
-   - Batch decompression to avoid blocking
-
-5. **Add alternative output formats**:
+2. **Add alternative output formats**:
    - Support JSON format for sequences (not just FASTA)
    - Support CSV/TSV for aggregated/details endpoints
    - Content negotiation based on Accept header or `format` parameter
+
+3. **Optimize sequence streaming** (if needed):
+   - Profile memory usage during sequence decompression
+   - Consider streaming responses for very large result sets
+   - Batch decompression to avoid blocking
 
 ### Phase 1: MVP ✅ COMPLETE
 
@@ -471,9 +506,10 @@ Target SLOs (from PLAN.md):
 - ✅ Multi-version sequence handling
 - ✅ All results match LAPIS exactly
 
-### What Needs Work 🚧
-- ❌ Sequence endpoints (nucleotide, amino acid)
-- ❌ Sequence decompression with zstandard
-- ❌ Alternative output formats (CSV, TSV, FASTA)
-- ❌ Insertion endpoints (nucleotideInsertions, aminoAcidInsertions)
-- ❌ Integration test suite comparing Querulus vs LAPIS
+### What's Next 🚀
+- ⏳ **Docker containerization** (TOP PRIORITY)
+- ⏳ **GitHub Actions CI/CD** (build and push Docker image)
+- ⏳ **Kubernetes integration** (useQuerulus toggle in Loculus helm chart)
+- ⏳ **Production deployment testing**
+- 📋 Insertion endpoints (nucleotideInsertions, aminoAcidInsertions) - AFTER deployment
+- 📋 Alternative output formats (CSV, TSV, JSON for sequences) - AFTER deployment

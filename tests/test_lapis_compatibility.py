@@ -432,6 +432,65 @@ class TestSequenceEndpoints:
         assert lapis_headers == querulus_headers, "Filtered sequences don't match"
 
 
+class TestOrderBy:
+    """Tests for orderBy parameter"""
+
+    def test_details_order_by_accession(self, config: TestConfig):
+        """Test orderBy=accession on details endpoint"""
+        params = {"limit": "10", "orderBy": "accession"}
+
+        resp = requests.get(config.querulus_endpoint("sample/details"), params=params)
+        assert resp.status_code == 200
+
+        data = resp.json()["data"]
+        accessions = [item["accession"] for item in data]
+
+        # Verify it's sorted
+        assert accessions == sorted(accessions), "Results not sorted by accession"
+
+    def test_details_order_by_metadata_field(self, config: TestConfig):
+        """Test orderBy with metadata field"""
+        params = {"limit": "20", "orderBy": "geoLocCountry", "fields": "accession,geoLocCountry"}
+
+        resp = requests.get(config.querulus_endpoint("sample/details"), params=params)
+        assert resp.status_code == 200
+
+        data = resp.json()["data"]
+        countries = [item.get("geoLocCountry") for item in data]
+
+        # Verify it's sorted (None values first in SQL)
+        assert countries == sorted(countries, key=lambda x: (x is not None, x)), "Results not sorted by country"
+
+    def test_aggregated_order_by_field(self, config: TestConfig):
+        """Test orderBy on aggregated endpoint"""
+        params = {"fields": "geoLocCountry", "limit": "10", "orderBy": "geoLocCountry"}
+
+        resp = requests.get(config.querulus_endpoint("sample/aggregated"), params=params)
+        assert resp.status_code == 200
+
+        data = resp.json()["data"]
+        countries = [item["geoLocCountry"] for item in data]
+
+        # Verify it's sorted
+        assert countries == sorted(countries, key=lambda x: (x is not None, x)), "Aggregated results not sorted"
+
+    def test_details_order_by_random(self, config: TestConfig):
+        """Test orderBy=random returns different results"""
+        params = {"limit": "5", "orderBy": "random"}
+
+        resp1 = requests.get(config.querulus_endpoint("sample/details"), params=params)
+        resp2 = requests.get(config.querulus_endpoint("sample/details"), params=params)
+
+        assert resp1.status_code == 200
+        assert resp2.status_code == 200
+
+        accessions1 = [item["accession"] for item in resp1.json()["data"]]
+        accessions2 = [item["accession"] for item in resp2.json()["data"]]
+
+        # Random ordering should give different results (very unlikely to be the same)
+        assert accessions1 != accessions2, "Random ordering returned same results twice"
+
+
 if __name__ == "__main__":
     # Run tests with pytest
     import sys

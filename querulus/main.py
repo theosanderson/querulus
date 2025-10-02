@@ -61,7 +61,9 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    db_healthy = await health_check()
+    db_healthy, error = await health_check()
+    if error:
+        logger.error(f"Database health check failed: {error}")
     return {
         "status": "healthy" if db_healthy else "unhealthy",
         "database": "connected" if db_healthy else "disconnected",
@@ -71,8 +73,9 @@ async def health():
 @app.get("/ready")
 async def ready():
     """Readiness check for Kubernetes"""
-    db_healthy = await health_check()
+    db_healthy, error = await health_check()
     if not db_healthy:
+        logger.error(f"Database readiness check failed: {error}")
         return JSONResponse(
             status_code=503,
             content={"status": "not ready", "reason": "database not connected"},

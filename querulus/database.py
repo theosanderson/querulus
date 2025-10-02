@@ -60,11 +60,17 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
-async def health_check() -> bool:
-    """Check if database connection is healthy"""
+async def health_check() -> tuple[bool, str | None]:
+    """Check if database connection is healthy
+
+    Returns:
+        Tuple of (is_healthy, error_message)
+    """
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("SELECT 1"))
-            return result.scalar() == 1
-    except Exception:
-        return False
+            if result.scalar() == 1:
+                return True, None
+            return False, "Database query returned unexpected result"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {str(e)}"

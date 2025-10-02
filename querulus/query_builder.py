@@ -613,6 +613,19 @@ class QueryBuilder:
             offset=offset,
         )
 
+    def build_amino_acid_sequences_query(
+        self,
+        gene: str,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[str, dict[str, Any]]:
+        return self._build_sequence_query(
+            segment_key="alignedAminoAcidSequences",
+            segment_name=gene,
+            limit=limit,
+            offset=offset,
+        )
+
     def build_aligned_sequences_metadata_query(
         self,
         limit: int | None = None,

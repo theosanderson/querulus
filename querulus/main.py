@@ -4,7 +4,7 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Request, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
@@ -804,43 +804,13 @@ async def get_aligned_amino_acid_sequences(
     except ValueError as e:
         return JSONResponse(status_code=404, content={"error": str(e)})
 
-    # Build query using QueryBuilder - amino acid sequences are in alignedAminoAcidSequences
+    # Build query using QueryBuilder
     builder = QueryBuilder(organism, organism_config)
     query_params = dict(request.query_params)
     builder.add_filters_from_params(query_params)
 
-    # Build sequences query for amino acid
-    params = {"organism": organism}
-    # Build WHERE clause for filters
-    where_clauses = []
-    for field, value in builder.filters.items():
-        param_name = f"filter_{field}"
-        where_clauses.append(f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}")
-        params[param_name] = value
-
-    where_clause = ""
-    if where_clauses:
-        where_clause = " AND " + " AND ".join(where_clauses)
-
-    # Query for amino acid sequences
-    query_str = f"""
-        SELECT
-            accession,
-            version,
-            joint_metadata -> 'alignedAminoAcidSequences' -> :gene ->> 'compressedSequence' as compressed_seq
-        FROM sequence_entries_view
-        WHERE organism = :organism
-          AND released_at IS NOT NULL
-          {where_clause}
-        ORDER BY accession, version
-    """
-
-    if limit is not None:
-        query_str += f" LIMIT {limit}"
-    if offset > 0:
-        query_str += f" OFFSET {offset}"
-
-    params["gene"] = gene
+    # Build amino acid sequences query
+    query_str, params = builder.build_amino_acid_sequences_query(gene, limit, offset)
 
     # Execute query
     async for db in get_db():
@@ -873,6 +843,89 @@ async def get_aligned_amino_acid_sequences(
 
         # Return based on dataFormat
         if dataFormat.upper() == "JSON":
+            # Return JSON array with accessionVersion and gene name
+            json_data = [
+                {
+                    "accessionVersion": seq["accessionVersion"],
+                    gene: seq["sequence"]
+                }
+                for seq in sequences
+            ]
+            return JSONResponse(content=json_data)
+        else:
+            # Return FASTA format
+            fasta_lines = []
+            for seq in sequences:
+                fasta_lines.append(f">{seq['accessionVersion']}")
+                fasta_lines.append(seq["sequence"])
+            fasta_content = "\n".join(fasta_lines)
+            return Response(content=fasta_content, media_type="text/x-fasta")
+
+
+@app.post("/{organism}/sample/alignedAminoAcidSequences/{gene}")
+async def post_aligned_amino_acid_sequences(
+    organism: str,
+    gene: str,
+    request: Request,
+    body: dict = Body(...),
+):
+    """
+    POST endpoint for aligned amino acid sequences.
+    Accepts JSON body with query parameters including filters, limit, offset, and dataFormat.
+
+    Examples:
+    - POST /ebola-sudan/sample/alignedAminoAcidSequences/VP35
+      Body: {"accessionVersion": "LOC_00004T9.1", "dataFormat": "FASTA"}
+    """
+    # Validate organism
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+    # Extract limit, offset, dataFormat from body
+    limit = body.get("limit")
+    offset = body.get("offset", 0)
+    data_format = body.get("dataFormat", "FASTA")
+
+    # Build query using QueryBuilder
+    builder = QueryBuilder(organism, organism_config)
+    builder.add_filters_from_params(body)
+
+    # Build amino acid sequences query
+    query_str, params = builder.build_amino_acid_sequences_query(gene, limit, offset)
+
+    # Execute query
+    async for db in get_db():
+        result = await db.execute(text(query_str), params)
+        rows = result.fetchall()
+
+        # Decompress sequences
+        compression = request.app.state.compression
+        sequences = []
+
+        for row in rows:
+            accession_version = f"{row.accession}.{row.version}"
+            compressed_seq = row.compressed_seq
+
+            if not compressed_seq:
+                continue
+
+            try:
+                # Decompress amino acid sequence
+                sequence = compression.decompress_amino_acid_sequence(
+                    compressed_seq, organism, gene
+                )
+                sequences.append({
+                    "accessionVersion": accession_version,
+                    "sequence": sequence
+                })
+            except Exception as e:
+                print(f"Error decompressing {accession_version}: {e}")
+                continue
+
+        # Return based on dataFormat
+        if data_format.upper() == "JSON":
             # Return JSON array with accessionVersion and gene name
             json_data = [
                 {

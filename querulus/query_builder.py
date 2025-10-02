@@ -264,9 +264,13 @@ class QueryBuilder:
             if needs_cte:
                 # Need to use a CTE because window functions can't be in GROUP BY
                 # First compute versionStatus for each row, then aggregate
-                # Include both group_by_fields and any filtered computed fields
+                # Include both group_by_fields and any filtered fields (computed or table columns)
+                # We need to include table column fields like groupId, submissionId in the CTE SELECT
+                # so they can be referenced in the outer WHERE clause
+                table_column_camelcase_fields = {"groupId", "submissionId", "submitter", "isRevocation", "versionComment"}
                 all_fields = set(self.group_by_fields)
-                all_fields.update(f for f in self.filters.keys() if f in computed_fields)
+                # Add any filtered fields that are computed or table columns (but not metadata fields)
+                all_fields.update(f for f in self.filters.keys() if f in computed_fields or f in table_column_camelcase_fields)
 
                 cte_select_parts = []
                 for field in all_fields:
@@ -290,7 +294,18 @@ class QueryBuilder:
                         cte_select_parts.append(
                             f"TO_CHAR({earliest_expr}, 'YYYY-MM-DD') AS \"{field}\""
                         )
+                    elif field == "groupId":
+                        cte_select_parts.append(f'group_id AS "{field}"')
+                    elif field == "submissionId":
+                        cte_select_parts.append(f'submission_id AS "{field}"')
+                    elif field == "submitter":
+                        cte_select_parts.append(f'submitter AS "{field}"')
+                    elif field == "isRevocation":
+                        cte_select_parts.append(f'is_revocation AS "{field}"')
+                    elif field == "versionComment":
+                        cte_select_parts.append(f'version_comment AS "{field}"')
                     else:
+                        # Metadata field from JSONB
                         cte_select_parts.append(
                             f'joint_metadata -> \'metadata\' ->> \'{field}\' AS "{field}"'
                         )
@@ -328,10 +343,11 @@ class QueryBuilder:
                     WHERE 1=1
                 """
 
-                # Add computed field filters in outer WHERE clause
+                # Add computed field and table column filters in outer WHERE clause
+                # (these were selected in the CTE, so we filter on them here)
                 if self.filters:
                     for field, value in self.filters.items():
-                        if field in computed_fields:
+                        if field in computed_fields or field in table_column_camelcase_fields:
                             param_name = f"filter_{field}"
                             query += f'\n  AND "{field}" = :{param_name}'
                             params[param_name] = value
@@ -374,6 +390,7 @@ class QueryBuilder:
 
             if needs_cte_for_filter:
                 # Build CTE to compute the filtered fields
+                table_column_camelcase_fields = {"groupId", "submissionId", "submitter", "isRevocation", "versionComment"}
                 cte_select_parts = []
                 for field in self.filters.keys():
                     if field == "versionStatus":
@@ -396,6 +413,16 @@ class QueryBuilder:
                         cte_select_parts.append(
                             f"TO_CHAR({earliest_expr}, 'YYYY-MM-DD') AS \"{field}\""
                         )
+                    elif field == "groupId":
+                        cte_select_parts.append(f'group_id AS "{field}"')
+                    elif field == "submissionId":
+                        cte_select_parts.append(f'submission_id AS "{field}"')
+                    elif field == "submitter":
+                        cte_select_parts.append(f'submitter AS "{field}"')
+                    elif field == "isRevocation":
+                        cte_select_parts.append(f'is_revocation AS "{field}"')
+                    elif field == "versionComment":
+                        cte_select_parts.append(f'version_comment AS "{field}"')
 
                 cte_select = ", ".join(cte_select_parts)
 
@@ -422,10 +449,10 @@ class QueryBuilder:
                     WHERE 1=1
                 """
 
-                # Add computed field filters in outer query
+                # Add computed field and table column filters in outer query
                 if self.filters:
                     for field, value in self.filters.items():
-                        if field in computed_fields:
+                        if field in computed_fields or field in table_column_camelcase_fields:
                             param_name = f"filter_{field}"
                             query += f'\n  AND "{field}" = :{param_name}'
                             params[param_name] = value

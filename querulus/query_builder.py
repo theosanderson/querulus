@@ -92,8 +92,8 @@ class QueryBuilder:
             elif field in computed_fields_map:
                 order_parts.append(computed_fields_map[field])
             else:
-                # Metadata field
-                order_parts.append(f"joint_metadata -> 'metadata' ->> '{field}'")
+                # Metadata field - use quoted name if in SELECT, otherwise JSONB path
+                order_parts.append(f'"{field}"')
 
         return ", ".join(order_parts) if order_parts else ("count DESC" if context == "aggregated" else "accession")
 

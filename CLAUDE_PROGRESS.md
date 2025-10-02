@@ -71,9 +71,10 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
 - Kubernetes manifests in loculus submodule (deployment, service, ingress)
 - `useQuerulus` toggle to switch from LAPIS to Querulus
 
-#### ✅ Recent Bug Fixes (2025-10-02)
+#### ✅ Recent Bug Fixes & Features (2025-10-02)
 - **versionStatus filter bug**: Removed from `special_params` - now filters work correctly
 - **Computed field filtering**: CTE-based approach for filtering by versionStatus, earliestReleaseDate
+- **Insertion endpoints**: Implemented nucleotide and amino acid insertions with LAPIS-compatible aggregation
 - All tests now passing (23/23)
 
 ### Current Working State
@@ -95,20 +96,19 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
 
 ### Immediate (Next Session) - Feature Parity
 
-1. **Add POST support for aggregated and details endpoints**:
-   - `POST /{organism}/sample/aggregated`
-   - `POST /{organism}/sample/details`
-   - Accept JSON body with same parameters as query strings
-   - Support all fields: versionStatus, isRevocation, fields, limit, offset, orderBy, etc.
-   - Ignore mutation/insertion arrays for now (not implemented)
-   - Add tests to verify POST endpoints match GET endpoint behavior
+1. ✅ **POST support for aggregated and details endpoints** (ALREADY IMPLEMENTED):
+   - `POST /{organism}/sample/aggregated` ✓
+   - `POST /{organism}/sample/details` ✓
+   - Accepts JSON body with query parameters
+   - Supports versionStatus, isRevocation, fields, limit, offset, orderBy
 
-2. **Implement insertion endpoints**:
-   - `GET /{organism}/sample/nucleotideInsertions`
-   - `GET /{organism}/sample/aminoAcidInsertions`
-   - Parse insertions from JSONB metadata
-   - Return list of insertions with positions and sequences
-   - Match LAPIS response format exactly
+2. ✅ **Insertion endpoints** (COMPLETED 2025-10-02):
+   - `POST /{organism}/sample/nucleotideInsertions` ✓
+   - `POST /{organism}/sample/aminoAcidInsertions` ✓
+   - Parses insertions from JSONB metadata
+   - Returns aggregated counts by position and symbols
+   - Matches LAPIS response format exactly
+   - Tested: counts match LAPIS perfectly
 
 3. **Add data format support**:
    - Support `dataFormat` parameter for sequences endpoints

@@ -857,6 +857,94 @@ class TestPostSequenceEndpoints:
 
         assert lapis_seq == querulus_seq, "Sequences should match exactly"
 
+    def test_post_aligned_nucleotide_sequences_with_accession(self):
+        """Test POST to alignedNucleotideSequences with specific accessionVersion - ebola-sudan organism"""
+        # Use ebola-sudan organism matching the user's curl example
+        config = TestConfig(organism="ebola-sudan")
+
+        payload = {
+            "accessionVersion": "LOC_00004T9.1",
+            "dataFormat": "FASTA"
+        }
+
+        # Test against lapis-main (the reference LAPIS instance for comparison)
+        lapis_resp = requests.post(
+            config.lapis_endpoint("sample/alignedNucleotideSequences"),
+            json=payload
+        )
+        querulus_resp = requests.post(
+            config.querulus_endpoint("sample/alignedNucleotideSequences"),
+            json=payload
+        )
+
+        assert lapis_resp.status_code == 200, f"LAPIS returned {lapis_resp.status_code}"
+        assert querulus_resp.status_code == 200, f"Querulus returned {querulus_resp.status_code}: {querulus_resp.text}"
+
+        # Both should return FASTA format
+        lapis_text = lapis_resp.text
+        querulus_text = querulus_resp.text
+
+        # Check FASTA format
+        assert lapis_text.startswith(">"), "LAPIS should return FASTA format"
+        assert querulus_text.startswith(">"), "Querulus should return FASTA format"
+
+        # Extract the sequences (everything after the header)
+        lapis_lines = lapis_text.split('\n')
+        querulus_lines = querulus_text.split('\n')
+
+        # Check headers match
+        assert lapis_lines[0] == querulus_lines[0], "FASTA headers should match"
+
+        # Check sequences match (join all lines after header, ignoring whitespace)
+        lapis_seq = ''.join(lapis_lines[1:]).replace('\n', '').replace('\r', '').strip()
+        querulus_seq = ''.join(querulus_lines[1:]).replace('\n', '').replace('\r', '').strip()
+
+        assert lapis_seq == querulus_seq, "Sequences should match exactly"
+
+    def test_post_aligned_amino_acid_sequences_with_accession(self):
+        """Test POST to alignedAminoAcidSequences with specific accessionVersion and gene - ebola-sudan organism"""
+        # Use ebola-sudan organism matching the user's curl example
+        config = TestConfig(organism="ebola-sudan")
+
+        payload = {
+            "accessionVersion": "LOC_00004T9.1",
+            "dataFormat": "FASTA"
+        }
+
+        # Test against lapis-main (the reference LAPIS instance for comparison)
+        lapis_resp = requests.post(
+            config.lapis_endpoint("sample/alignedAminoAcidSequences/VP35"),
+            json=payload
+        )
+        querulus_resp = requests.post(
+            config.querulus_endpoint("sample/alignedAminoAcidSequences/VP35"),
+            json=payload
+        )
+
+        assert lapis_resp.status_code == 200, f"LAPIS returned {lapis_resp.status_code}"
+        assert querulus_resp.status_code == 200, f"Querulus returned {querulus_resp.status_code}: {querulus_resp.text}"
+
+        # Both should return FASTA format
+        lapis_text = lapis_resp.text
+        querulus_text = querulus_resp.text
+
+        # Check FASTA format
+        assert lapis_text.startswith(">"), "LAPIS should return FASTA format"
+        assert querulus_text.startswith(">"), "Querulus should return FASTA format"
+
+        # Extract the sequences (everything after the header)
+        lapis_lines = lapis_text.split('\n')
+        querulus_lines = querulus_text.split('\n')
+
+        # Check headers match
+        assert lapis_lines[0] == querulus_lines[0], "FASTA headers should match"
+
+        # Check sequences match (join all lines after header, ignoring whitespace)
+        lapis_seq = ''.join(lapis_lines[1:]).replace('\n', '').replace('\r', '').strip()
+        querulus_seq = ''.join(querulus_lines[1:]).replace('\n', '').replace('\r', '').strip()
+
+        assert lapis_seq == querulus_seq, "Sequences should match exactly"
+
 
 def test_nucleotide_mutations_single_sample(config):
     """Test nucleotide mutations for a single sample"""

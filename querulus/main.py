@@ -729,7 +729,7 @@ async def post_aligned_nucleotide_sequences(organism: str, request: Request, bod
     builder.add_filters_from_params(filter_params)
 
     # Build sequences query
-    query_str, params = builder.build_aligned_sequences_query("main", limit, offset)
+    query_str, params = builder.build_sequences_query("main", limit, offset)
 
     # Execute query
     async for db in get_db():

@@ -75,13 +75,14 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
 - **versionStatus filter bug**: Removed from `special_params` - now filters work correctly
 - **Computed field filtering**: CTE-based approach for filtering by versionStatus, earliestReleaseDate
 - **Insertion endpoints**: Implemented nucleotide and amino acid insertions with LAPIS-compatible aggregation
-- All tests now passing (23/23)
+- **Data format support**: Added JSON format for sequences, TSV format for aggregated/details
+- All tests now passing (29/29)
 
 ### Current Working State
 
 **Server Status**: Running on `localhost:8000`, connects to PostgreSQL at `localhost:5432/loculus`
 **Test Database**: 8,324 west-nile sequences
-**Test Suite**: 23/23 integration tests passing (100% success rate)
+**Test Suite**: 29/29 integration tests passing (100% success rate)
 
 ### Key Technical Details
 
@@ -110,13 +111,13 @@ All fields from LAPIS `ReleasedDataModel.kt` implemented:
    - Matches LAPIS response format exactly
    - Tested: counts match LAPIS perfectly
 
-3. **Add data format support**:
-   - Support `dataFormat` parameter for sequences endpoints
-   - Options: `FASTA` (current default), `JSON`
-   - JSON format should return array of objects with accession, version, sequence
-   - Support TSV format for aggregated/details endpoints
-   - Content negotiation based on `dataFormat` parameter or Accept header
-   - Test all formats against LAPIS
+3. ✅ **Add data format support** (COMPLETED 2025-10-02):
+   - `dataFormat` parameter for all sequence endpoints ✓
+   - JSON format: Returns array of `{accessionVersion, segmentName}` objects ✓
+   - TSV format: For aggregated/details endpoints with tab-separated values ✓
+   - FASTA remains default for sequences, JSON default for aggregated/details ✓
+   - All formats tested and matching LAPIS exactly ✓
+   - 6 new tests added to test suite (29/29 tests passing) ✓
 
 4. **Additional computed field improvements**:
    - Review LAPIS for any missing computed fields

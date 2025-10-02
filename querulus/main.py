@@ -103,6 +103,7 @@ async def get_aggregated(
     fields: str | None = Query(None, description="Comma-separated list of fields to group by"),
     limit: int | None = Query(None, description="Maximum number of results"),
     offset: int = Query(0, description="Number of results to skip"),
+    dataFormat: str = Query("JSON", description="Output format: JSON or TSV"),
 ):
     """
     Get aggregated sequence counts with optional grouping by metadata fields.
@@ -112,6 +113,7 @@ async def get_aggregated(
     - GET /west-nile/sample/aggregated?fields=geoLocCountry - Group by country
     - GET /west-nile/sample/aggregated?geoLocCountry=USA - Filter by country
     - GET /west-nile/sample/aggregated?fields=geoLocCountry&geoLocCountry=USA - Both
+    - GET /west-nile/sample/aggregated?fields=geoLocCountry&dataFormat=tsv - TSV format
     """
     # Validate organism
     try:
@@ -152,28 +154,55 @@ async def get_aggregated(
         if group_by_fields:
             # Return grouped results with field names
             for row in rows:
-                row_dict = {"count": row.count}
+                row_dict = {}
                 for field in group_by_fields:
                     # Use _mapping to access column by name (handles camelCase)
                     row_dict[field] = row._mapping[field]
+                row_dict["count"] = row.count
                 data.append(row_dict)
         else:
             # Simple total count
             data = [{"count": rows[0].count if rows else 0}]
 
-        # Generate request ID
-        request_id = str(uuid.uuid4())
+        # Return based on dataFormat
+        if dataFormat.upper() == "TSV":
+            # Generate TSV output
+            if not data:
+                return Response(content="", media_type="text/tab-separated-values")
 
-        # Return LAPIS-compatible response
-        return {
-            "data": data,
-            "info": {
-                "dataVersion": "0",  # TODO: Implement versioning
-                "requestId": request_id,
-                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
-                "queryInfo": "Aggregated query",
-            },
-        }
+            # Get column names (fields + count)
+            columns = []
+            if group_by_fields:
+                columns.extend(group_by_fields)
+            columns.append("count")
+
+            # Build TSV
+            tsv_lines = ["\t".join(columns)]
+            for row_dict in data:
+                row_values = []
+                for col in columns:
+                    value = row_dict.get(col, "")
+                    # Convert None to empty string, otherwise convert to string
+                    row_values.append("" if value is None else str(value))
+                tsv_lines.append("\t".join(row_values))
+
+            tsv_content = "\n".join(tsv_lines)
+            return Response(content=tsv_content, media_type="text/tab-separated-values")
+        else:
+            # Return JSON format
+            # Generate request ID
+            request_id = str(uuid.uuid4())
+
+            # Return LAPIS-compatible response
+            return {
+                "data": data,
+                "info": {
+                    "dataVersion": "0",  # TODO: Implement versioning
+                    "requestId": request_id,
+                    "requestInfo": f"{organism_config.schema['organismName']} on querulus",
+                    "queryInfo": "Aggregated query",
+                },
+            }
 
 
 @app.post("/{organism}/sample/aggregated")
@@ -259,6 +288,7 @@ async def get_details(
     fields: str | None = Query(None, description="Comma-separated list of fields to return"),
     limit: int | None = Query(None, description="Maximum number of results"),
     offset: int = Query(0, description="Number of results to skip"),
+    dataFormat: str = Query("JSON", description="Output format: JSON or TSV"),
 ):
     """
     Get detailed metadata for sequences.
@@ -267,6 +297,7 @@ async def get_details(
     - GET /west-nile/sample/details?limit=10
     - GET /west-nile/sample/details?fields=accession,geoLocCountry,lineage&limit=5
     - GET /west-nile/sample/details?geoLocCountry=USA&limit=10
+    - GET /west-nile/sample/details?limit=10&dataFormat=tsv
     """
     # Validate organism
     try:
@@ -320,19 +351,49 @@ async def get_details(
                     row_dict[key] = value
             data.append(row_dict)
 
-        # Generate request ID
-        request_id = str(uuid.uuid4())
+        # Return based on dataFormat
+        if dataFormat.upper() == "TSV":
+            # Generate TSV output
+            if not data:
+                return Response(content="", media_type="text/tab-separated-values")
 
-        # Return LAPIS-compatible response
-        return {
-            "data": data,
-            "info": {
-                "dataVersion": "0",  # TODO: Implement versioning
-                "requestId": request_id,
-                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
-                "queryInfo": "Details query",
-            },
-        }
+            # Get all column names from first row
+            columns = list(data[0].keys())
+
+            # Build TSV
+            tsv_lines = ["\t".join(columns)]
+            for row_dict in data:
+                row_values = []
+                for col in columns:
+                    value = row_dict.get(col, "")
+                    # Convert None to empty string, handle special types
+                    if value is None:
+                        row_values.append("")
+                    elif isinstance(value, dict) or isinstance(value, list):
+                        # Convert complex types to JSON string
+                        import json
+                        row_values.append(json.dumps(value))
+                    else:
+                        row_values.append(str(value))
+                tsv_lines.append("\t".join(row_values))
+
+            tsv_content = "\n".join(tsv_lines)
+            return Response(content=tsv_content, media_type="text/tab-separated-values")
+        else:
+            # Return JSON format
+            # Generate request ID
+            request_id = str(uuid.uuid4())
+
+            # Return LAPIS-compatible response
+            return {
+                "data": data,
+                "info": {
+                    "dataVersion": "0",  # TODO: Implement versioning
+                    "requestId": request_id,
+                    "requestInfo": f"{organism_config.schema['organismName']} on querulus",
+                    "queryInfo": "Details query",
+                },
+            }
 
 
 @app.post("/{organism}/sample/details")
@@ -408,13 +469,15 @@ async def get_aligned_nucleotide_sequences(
     request: Request,
     limit: int | None = Query(None, description="Maximum number of sequences"),
     offset: int = Query(0, description="Number of sequences to skip"),
+    dataFormat: str = Query("FASTA", description="Output format: FASTA or JSON"),
 ):
     """
-    Get aligned nucleotide sequences in FASTA format.
+    Get aligned nucleotide sequences in FASTA or JSON format.
 
     Examples:
     - GET /west-nile/sample/alignedNucleotideSequences?limit=10
     - GET /west-nile/sample/alignedNucleotideSequences?geoLocCountry=USA&limit=5
+    - GET /west-nile/sample/alignedNucleotideSequences?limit=5&dataFormat=JSON
     """
     # Validate organism
     try:
@@ -435,9 +498,9 @@ async def get_aligned_nucleotide_sequences(
         result = await db.execute(text(query_str), params)
         rows = result.fetchall()
 
-        # Decompress sequences and format as FASTA
-        fasta_lines = []
+        # Decompress sequences
         compression = request.app.state.compression
+        sequences = []
 
         for row in rows:
             accession_version = f"{row.accession}.{row.version}"
@@ -451,16 +514,33 @@ async def get_aligned_nucleotide_sequences(
                 sequence = compression.decompress_nucleotide_sequence(
                     compressed_seq, organism, "main"
                 )
-                # Add FASTA header and sequence
-                fasta_lines.append(f">{accession_version}")
-                fasta_lines.append(sequence)
+                sequences.append({
+                    "accessionVersion": accession_version,
+                    "sequence": sequence
+                })
             except Exception as e:
                 print(f"Error decompressing {accession_version}: {e}")
                 continue
 
-        # Return FASTA format
-        fasta_content = "\n".join(fasta_lines)
-        return Response(content=fasta_content, media_type="text/x-fasta")
+        # Return based on dataFormat
+        if dataFormat.upper() == "JSON":
+            # Return JSON array with accessionVersion and main (segment name)
+            json_data = [
+                {
+                    "accessionVersion": seq["accessionVersion"],
+                    "main": seq["sequence"]
+                }
+                for seq in sequences
+            ]
+            return JSONResponse(content=json_data)
+        else:
+            # Return FASTA format
+            fasta_lines = []
+            for seq in sequences:
+                fasta_lines.append(f">{seq['accessionVersion']}")
+                fasta_lines.append(seq["sequence"])
+            fasta_content = "\n".join(fasta_lines)
+            return Response(content=fasta_content, media_type="text/x-fasta")
 
 
 @app.get("/{organism}/sample/unalignedNucleotideSequences")
@@ -469,13 +549,15 @@ async def get_unaligned_nucleotide_sequences(
     request: Request,
     limit: int | None = Query(None, description="Maximum number of sequences"),
     offset: int = Query(0, description="Number of sequences to skip"),
+    dataFormat: str = Query("FASTA", description="Output format: FASTA or JSON"),
 ):
     """
-    Get unaligned nucleotide sequences in FASTA format.
+    Get unaligned nucleotide sequences in FASTA or JSON format.
 
     Examples:
     - GET /west-nile/sample/unalignedNucleotideSequences?limit=10
     - GET /west-nile/sample/unalignedNucleotideSequences?geoLocCountry=USA&limit=5
+    - GET /west-nile/sample/unalignedNucleotideSequences?limit=5&dataFormat=JSON
     """
     # Validate organism
     try:
@@ -496,9 +578,9 @@ async def get_unaligned_nucleotide_sequences(
         result = await db.execute(text(query_str), params)
         rows = result.fetchall()
 
-        # Decompress sequences and format as FASTA
-        fasta_lines = []
+        # Decompress sequences
         compression = request.app.state.compression
+        sequences = []
 
         for row in rows:
             accession_version = f"{row.accession}.{row.version}"
@@ -512,16 +594,33 @@ async def get_unaligned_nucleotide_sequences(
                 sequence = compression.decompress_nucleotide_sequence(
                     compressed_seq, organism, "main"
                 )
-                # Add FASTA header and sequence
-                fasta_lines.append(f">{accession_version}")
-                fasta_lines.append(sequence)
+                sequences.append({
+                    "accessionVersion": accession_version,
+                    "sequence": sequence
+                })
             except Exception as e:
                 print(f"Error decompressing {accession_version}: {e}")
                 continue
 
-        # Return FASTA format
-        fasta_content = "\n".join(fasta_lines)
-        return Response(content=fasta_content, media_type="text/x-fasta")
+        # Return based on dataFormat
+        if dataFormat.upper() == "JSON":
+            # Return JSON array with accessionVersion and main (segment name)
+            json_data = [
+                {
+                    "accessionVersion": seq["accessionVersion"],
+                    "main": seq["sequence"]
+                }
+                for seq in sequences
+            ]
+            return JSONResponse(content=json_data)
+        else:
+            # Return FASTA format
+            fasta_lines = []
+            for seq in sequences:
+                fasta_lines.append(f">{seq['accessionVersion']}")
+                fasta_lines.append(seq["sequence"])
+            fasta_content = "\n".join(fasta_lines)
+            return Response(content=fasta_content, media_type="text/x-fasta")
 
 
 @app.get("/{organism}/sample/alignedAminoAcidSequences/{gene}")
@@ -531,13 +630,15 @@ async def get_aligned_amino_acid_sequences(
     request: Request,
     limit: int | None = Query(None, description="Maximum number of sequences"),
     offset: int = Query(0, description="Number of sequences to skip"),
+    dataFormat: str = Query("FASTA", description="Output format: FASTA or JSON"),
 ):
     """
-    Get aligned amino acid sequences in FASTA format.
+    Get aligned amino acid sequences in FASTA or JSON format.
 
     Examples:
     - GET /west-nile/sample/alignedAminoAcidSequences/2K?limit=10
     - GET /west-nile/sample/alignedAminoAcidSequences/2K?geoLocCountry=USA&limit=5
+    - GET /west-nile/sample/alignedAminoAcidSequences/2K?limit=5&dataFormat=JSON
     """
     # Validate organism
     try:
@@ -588,9 +689,9 @@ async def get_aligned_amino_acid_sequences(
         result = await db.execute(text(query_str), params)
         rows = result.fetchall()
 
-        # Decompress sequences and format as FASTA
-        fasta_lines = []
+        # Decompress sequences
         compression = request.app.state.compression
+        sequences = []
 
         for row in rows:
             accession_version = f"{row.accession}.{row.version}"
@@ -604,16 +705,33 @@ async def get_aligned_amino_acid_sequences(
                 sequence = compression.decompress_amino_acid_sequence(
                     compressed_seq, organism, gene
                 )
-                # Add FASTA header and sequence
-                fasta_lines.append(f">{accession_version}")
-                fasta_lines.append(sequence)
+                sequences.append({
+                    "accessionVersion": accession_version,
+                    "sequence": sequence
+                })
             except Exception as e:
                 print(f"Error decompressing {accession_version}: {e}")
                 continue
 
-        # Return FASTA format
-        fasta_content = "\n".join(fasta_lines)
-        return Response(content=fasta_content, media_type="text/x-fasta")
+        # Return based on dataFormat
+        if dataFormat.upper() == "JSON":
+            # Return JSON array with accessionVersion and gene name
+            json_data = [
+                {
+                    "accessionVersion": seq["accessionVersion"],
+                    gene: seq["sequence"]
+                }
+                for seq in sequences
+            ]
+            return JSONResponse(content=json_data)
+        else:
+            # Return FASTA format
+            fasta_lines = []
+            for seq in sequences:
+                fasta_lines.append(f">{seq['accessionVersion']}")
+                fasta_lines.append(seq["sequence"])
+            fasta_content = "\n".join(fasta_lines)
+            return Response(content=fasta_content, media_type="text/x-fasta")
 
 
 # ===== MUTATION ENDPOINTS (MOCK DATA) =====

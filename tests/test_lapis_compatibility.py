@@ -491,6 +491,130 @@ class TestOrderBy:
         assert accessions1 != accessions2, "Random ordering returned same results twice"
 
 
+class TestDataFormats:
+    """Test different data format options (JSON, FASTA, TSV)"""
+
+    def test_nucleotide_sequences_json_format(self, config: TestConfig):
+        """Test JSON format for nucleotide sequences"""
+        params = {"limit": "2", "dataFormat": "JSON"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/alignedNucleotideSequences"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/alignedNucleotideSequences"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()
+        querulus_data = querulus_resp.json()
+
+        # Both should be arrays
+        assert isinstance(lapis_data, list)
+        assert isinstance(querulus_data, list)
+        assert len(querulus_data) == len(lapis_data)
+
+        # Check structure of first item
+        assert "accessionVersion" in querulus_data[0]
+        assert "main" in querulus_data[0]
+        assert querulus_data[0]["accessionVersion"] == lapis_data[0]["accessionVersion"]
+
+    def test_nucleotide_sequences_fasta_format_default(self, config: TestConfig):
+        """Test FASTA format for nucleotide sequences (default)"""
+        params = {"limit": "2"}
+
+        resp = requests.get(config.querulus_endpoint("sample/alignedNucleotideSequences"), params=params)
+        assert resp.status_code == 200
+        assert "text/x-fasta" in resp.headers["content-type"]
+
+        # Check FASTA format
+        content = resp.text
+        assert content.startswith(">")
+        assert "\n" in content
+
+    def test_amino_acid_sequences_json_format(self, config: TestConfig):
+        """Test JSON format for amino acid sequences"""
+        params = {"limit": "10", "dataFormat": "JSON"}
+
+        # Use a known gene for west-nile
+        lapis_resp = requests.get(config.lapis_endpoint("sample/alignedAminoAcidSequences/2K"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/alignedAminoAcidSequences/2K"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_data = lapis_resp.json()
+        querulus_data = querulus_resp.json()
+
+        # Both should be arrays
+        assert isinstance(lapis_data, list)
+        assert isinstance(querulus_data, list)
+
+        # Check structure (if we have data)
+        if len(querulus_data) > 0:
+            assert "accessionVersion" in querulus_data[0]
+            assert "2K" in querulus_data[0]  # Gene name as key
+
+    def test_aggregated_tsv_format(self, config: TestConfig):
+        """Test TSV format for aggregated data"""
+        params = {"fields": "geoLocCountry", "dataFormat": "tsv"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/aggregated"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/aggregated"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+        assert "text/tab-separated-values" in querulus_resp.headers["content-type"]
+
+        # Parse TSV
+        querulus_lines = querulus_resp.text.strip().split("\n")
+        lapis_lines = lapis_resp.text.strip().split("\n")
+
+        # Check header
+        assert querulus_lines[0].split("\t") == ["geoLocCountry", "count"]
+
+        # Check that we have data rows
+        assert len(querulus_lines) > 1
+
+        # Verify TSV format (tabs separate columns)
+        for line in querulus_lines[1:5]:  # Check first few data rows
+            parts = line.split("\t")
+            assert len(parts) == 2  # Should have 2 columns
+
+    def test_details_tsv_format(self, config: TestConfig):
+        """Test TSV format for details data"""
+        params = {"limit": "5", "dataFormat": "tsv", "fields": "accession,version,geoLocCountry"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/details"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/details"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+        assert "text/tab-separated-values" in querulus_resp.headers["content-type"]
+
+        # Parse TSV
+        querulus_lines = querulus_resp.text.strip().split("\n")
+
+        # Check header exists
+        assert len(querulus_lines) > 0
+        headers = querulus_lines[0].split("\t")
+        assert "accession" in headers
+        assert "version" in headers
+
+        # Check data rows
+        assert len(querulus_lines) == 6  # header + 5 data rows
+
+    def test_aggregated_json_format_default(self, config: TestConfig):
+        """Test that JSON is the default format for aggregated"""
+        params = {"fields": "geoLocCountry", "limit": "3"}
+
+        resp = requests.get(config.querulus_endpoint("sample/aggregated"), params=params)
+        assert resp.status_code == 200
+
+        # Should return JSON by default
+        data = resp.json()
+        assert "data" in data
+        assert "info" in data
+
+
 if __name__ == "__main__":
     # Run tests with pytest
     import sys

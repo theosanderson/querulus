@@ -1199,6 +1199,61 @@ def test_amino_acid_mutations_single_sample_post():
             f"sequenceName mismatch for {lapis_mut['mutation']}"
 
 
+class TestPostSequenceEndpoints:
+    """Test POST endpoints for sequence retrieval with specific accessionVersion"""
+
+    def test_post_unaligned_nucleotide_sequences_specific_accession(self):
+        """Test POST unalignedNucleotideSequences with specific accessionVersion for cchf"""
+        config = TestConfig(
+            organism="cchf"
+        )
+
+        # Request specific sequence by accessionVersion with FASTA format
+        body = {
+            "accessionVersion": "LOC_001DL85.1",
+            "dataFormat": "FASTA"
+        }
+
+        lapis_resp = requests.post(
+            config.lapis_endpoint("sample/unalignedNucleotideSequences/L"),
+            json=body
+        )
+        querulus_resp = requests.post(
+            config.querulus_endpoint("sample/unalignedNucleotideSequences/L"),
+            json=body
+        )
+
+        assert lapis_resp.status_code == 200, f"LAPIS returned {lapis_resp.status_code}"
+        assert querulus_resp.status_code == 200, f"Querulus returned {querulus_resp.status_code}: {querulus_resp.text}"
+
+        # Both should return FASTA format
+        assert lapis_resp.text.startswith(">"), "LAPIS should return FASTA format"
+        assert querulus_resp.text.startswith(">"), "Querulus should return FASTA format"
+
+        # Extract sequences for comparison
+        lapis_seqs = []
+        querulus_seqs = []
+
+        for fasta_text, seq_list in [(lapis_resp.text, lapis_seqs), (querulus_resp.text, querulus_seqs)]:
+            current_seq = []
+            for line in fasta_text.split('\n'):
+                if line.startswith('>'):
+                    if current_seq:
+                        seq_list.append(''.join(current_seq))
+                        current_seq = []
+                elif line.strip():
+                    current_seq.append(line.strip())
+            if current_seq:
+                seq_list.append(''.join(current_seq))
+
+        # Should return exactly 1 sequence
+        assert len(lapis_seqs) == 1, f"LAPIS should return 1 sequence, got {len(lapis_seqs)}"
+        assert len(querulus_seqs) == 1, f"Querulus should return 1 sequence, got {len(querulus_seqs)}"
+
+        # Sequences should match
+        assert lapis_seqs == querulus_seqs, "Sequences don't match"
+
+
 class TestDownloadAsFile:
     """Test downloadAsFile parameter with various endpoints"""
 

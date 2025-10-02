@@ -951,27 +951,6 @@ async def post_aligned_amino_acid_sequences(
 # to prevent client errors.
 
 
-@app.post("/{organism}/sample/nucleotideMutations")
-async def post_nucleotide_mutations(organism: str):
-    """
-    Get nucleotide mutations (MOCK - returns empty data).
-
-    TODO: Implement actual mutation calling by comparing sequences to reference genome.
-    """
-    # Return empty data in LAPIS format
-    return JSONResponse(
-        content={
-            "data": [],
-            "info": {
-                "dataVersion": "0",
-                "requestId": str(uuid.uuid4()),
-                "requestInfo": f"{organism} nucleotide mutations (MOCK DATA)",
-                "queryInfo": "Mutations endpoint not yet implemented"
-            }
-        }
-    )
-
-
 @app.post("/{organism}/sample/aminoAcidMutations")
 async def post_amino_acid_mutations(organism: str):
     """
@@ -1272,7 +1251,7 @@ async def get_nucleotide_mutations(
 async def post_nucleotide_mutations(
     organism: str,
     request: Request,
-    body: dict = None,
+    body: dict = Body({}),
 ):
     """POST version of nucleotide mutations endpoint"""
     # Merge query params and body params

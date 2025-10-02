@@ -1007,6 +1007,72 @@ def test_nucleotide_mutations_single_sample():
             f"sequenceName mismatch for {lapis_mut['mutation']}"
 
 
+def test_nucleotide_mutations_single_sample_post():
+    """Test POST nucleotide mutations for a single sample - ebola-sudan organism"""
+    config = TestConfig(organism="ebola-sudan")
+    accession = "LOC_000001Y.1"
+
+    payload = {
+        "accessionVersion": accession
+    }
+
+    lapis_resp = requests.post(
+        config.lapis_endpoint("sample/nucleotideMutations"),
+        json=payload
+    )
+    querulus_resp = requests.post(
+        config.querulus_endpoint("sample/nucleotideMutations"),
+        json=payload
+    )
+
+    assert lapis_resp.status_code == 200
+    assert querulus_resp.status_code == 200
+
+    lapis_data = lapis_resp.json()
+    querulus_data = querulus_resp.json()
+
+    # Compare mutation data
+    lapis_mutations = lapis_data["data"]
+    querulus_mutations = querulus_data["data"]
+
+    # Should have same number of mutations
+    assert len(lapis_mutations) == len(querulus_mutations), \
+        f"Mutation count mismatch: LAPIS has {len(lapis_mutations)}, Querulus has {len(querulus_mutations)}"
+
+    # Verify we have a reasonable number of mutations
+    assert len(lapis_mutations) > 0, "LAPIS returned no mutations"
+
+    # Check mutation strings match
+    lapis_mutation_strings = {m["mutation"] for m in lapis_mutations}
+    querulus_mutation_strings = {m["mutation"] for m in querulus_mutations}
+
+    # Verify mutation strings match
+    assert lapis_mutation_strings == querulus_mutation_strings, \
+        f"Mutation strings don't match.\nLAPIS: {sorted(lapis_mutation_strings)}\nQuerulus: {sorted(querulus_mutation_strings)}"
+
+    # Verify detailed fields for each mutation
+    for lapis_mut in lapis_mutations:
+        # Find matching mutation in querulus data
+        querulus_mut = next((m for m in querulus_mutations if m["mutation"] == lapis_mut["mutation"]), None)
+        assert querulus_mut is not None, f"Mutation {lapis_mut['mutation']} not found in Querulus response"
+
+        # Check all fields match
+        assert lapis_mut["mutationFrom"] == querulus_mut["mutationFrom"], \
+            f"mutationFrom mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["mutationTo"] == querulus_mut["mutationTo"], \
+            f"mutationTo mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["position"] == querulus_mut["position"], \
+            f"position mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["count"] == querulus_mut["count"], \
+            f"count mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["coverage"] == querulus_mut["coverage"], \
+            f"coverage mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["proportion"] == querulus_mut["proportion"], \
+            f"proportion mismatch for {lapis_mut['mutation']}"
+        assert lapis_mut["sequenceName"] == querulus_mut["sequenceName"], \
+            f"sequenceName mismatch for {lapis_mut['mutation']}"
+
+
 class TestDownloadAsFile:
     """Test downloadAsFile parameter with various endpoints"""
 

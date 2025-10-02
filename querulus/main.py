@@ -623,7 +623,7 @@ async def get_aligned_amino_acid_sequences(
 
 
 @app.post("/{organism}/sample/nucleotideMutations")
-async def post_nucleotide_mutations(organism: str, request: Request):
+async def post_nucleotide_mutations(organism: str):
     """
     Get nucleotide mutations (MOCK - returns empty data).
 
@@ -644,7 +644,7 @@ async def post_nucleotide_mutations(organism: str, request: Request):
 
 
 @app.post("/{organism}/sample/aminoAcidMutations")
-async def post_amino_acid_mutations(organism: str, request: Request):
+async def post_amino_acid_mutations(organism: str):
     """
     Get amino acid mutations (MOCK - returns empty data).
 
@@ -664,43 +664,200 @@ async def post_amino_acid_mutations(organism: str, request: Request):
 
 
 @app.post("/{organism}/sample/nucleotideInsertions")
-async def post_nucleotide_insertions(organism: str, request: Request):
+async def post_nucleotide_insertions(organism: str, body: dict = {}):
     """
-    Get nucleotide insertions (MOCK - returns empty data).
+    Get nucleotide insertions aggregated across all matching sequences.
 
-    TODO: Implement actual insertion detection from alignments.
+    Returns list of insertions with counts, positions, and inserted symbols.
     """
-    return JSONResponse(
-        content={
-            "data": [],
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+    # Build query to get all insertions from matching sequences
+    builder = QueryBuilder(organism, organism_config)
+
+    # Add filters from body (excluding special fields)
+    filter_params = {}
+    for k, v in body.items():
+        if k not in ["fields", "limit", "offset", "orderBy",
+                    "nucleotideMutations", "aminoAcidMutations",
+                    "nucleotideInsertions", "aminoAcidInsertions"]:
+            if k == "isRevocation":
+                filter_params["is_revocation"] = v if isinstance(v, bool) else v.lower() == "true"
+            else:
+                filter_params[k] = v
+    builder.add_filters_from_params(filter_params)
+
+    # Build query to get insertions
+    # We need to expand the insertions array and count occurrences
+    params = {"organism": organism}
+
+    # Build WHERE clause for filters
+    where_clauses = []
+    for field, value in builder.filters.items():
+        param_name = f"filter_{field}"
+        where_clauses.append(f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}")
+        params[param_name] = value
+
+    where_clause = ""
+    if where_clauses:
+        where_clause = " AND " + " AND ".join(where_clauses)
+
+    # Query to aggregate insertions
+    # The insertions are stored as {"main": ["position:sequence", ...]}
+    query_str = f"""
+        WITH insertions_data AS (
+            SELECT
+                jsonb_array_elements_text(joint_metadata -> 'nucleotideInsertions' -> 'main') as insertion_str
+            FROM sequence_entries_view
+            WHERE organism = :organism
+              AND released_at IS NOT NULL
+              AND joint_metadata -> 'nucleotideInsertions' -> 'main' IS NOT NULL
+              {where_clause}
+        ),
+        parsed_insertions AS (
+            SELECT
+                split_part(insertion_str, ':', 1)::int as position,
+                split_part(insertion_str, ':', 2) as inserted_symbols
+            FROM insertions_data
+        )
+        SELECT
+            'ins_' || position || ':' || inserted_symbols as insertion,
+            COUNT(*) as count,
+            inserted_symbols,
+            position,
+            NULL::text as sequence_name
+        FROM parsed_insertions
+        GROUP BY position, inserted_symbols
+        ORDER BY count DESC, position ASC
+    """
+
+    async for db in get_db():
+        result = await db.execute(text(query_str), params)
+        rows = result.fetchall()
+
+        # Format results
+        data = []
+        for row in rows:
+            data.append({
+                "insertion": row.insertion,
+                "count": row.count,
+                "insertedSymbols": row.inserted_symbols,
+                "position": row.position,
+                "sequenceName": row.sequence_name
+            })
+
+        return {
+            "data": data,
             "info": {
                 "dataVersion": "0",
                 "requestId": str(uuid.uuid4()),
-                "requestInfo": f"{organism} nucleotide insertions (MOCK DATA)",
-                "queryInfo": "Insertions endpoint not yet implemented"
+                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
+                "queryInfo": "Nucleotide insertions query"
             }
         }
-    )
 
 
 @app.post("/{organism}/sample/aminoAcidInsertions")
-async def post_amino_acid_insertions(organism: str, request: Request):
+async def post_amino_acid_insertions(organism: str, body: dict = {}):
     """
-    Get amino acid insertions (MOCK - returns empty data).
+    Get amino acid insertions aggregated across all matching sequences.
 
-    TODO: Implement actual insertion detection from amino acid alignments.
+    Returns list of insertions with counts, positions, gene names, and inserted symbols.
     """
-    return JSONResponse(
-        content={
-            "data": [],
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+    # Build query to get all insertions from matching sequences
+    builder = QueryBuilder(organism, organism_config)
+
+    # Add filters from body (excluding special fields)
+    filter_params = {}
+    for k, v in body.items():
+        if k not in ["fields", "limit", "offset", "orderBy",
+                    "nucleotideMutations", "aminoAcidMutations",
+                    "nucleotideInsertions", "aminoAcidInsertions"]:
+            if k == "isRevocation":
+                filter_params["is_revocation"] = v if isinstance(v, bool) else v.lower() == "true"
+            else:
+                filter_params[k] = v
+    builder.add_filters_from_params(filter_params)
+
+    # Build query to get insertions from all genes
+    params = {"organism": organism}
+
+    # Build WHERE clause for filters
+    where_clauses = []
+    for field, value in builder.filters.items():
+        param_name = f"filter_{field}"
+        where_clauses.append(f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}")
+        params[param_name] = value
+
+    where_clause = ""
+    if where_clauses:
+        where_clause = " AND " + " AND ".join(where_clauses)
+
+    # Query to aggregate amino acid insertions across all genes
+    # The insertions are stored as {"gene1": ["position:sequence", ...], "gene2": [...]}
+    query_str = f"""
+        WITH gene_insertions AS (
+            SELECT
+                gene_key as gene,
+                jsonb_array_elements_text(gene_insertions) as insertion_str
+            FROM sequence_entries_view,
+                 LATERAL jsonb_each(joint_metadata -> 'aminoAcidInsertions') as genes(gene_key, gene_insertions)
+            WHERE organism = :organism
+              AND released_at IS NOT NULL
+              AND joint_metadata -> 'aminoAcidInsertions' IS NOT NULL
+              AND jsonb_typeof(gene_insertions) = 'array'
+              {where_clause}
+        ),
+        parsed_insertions AS (
+            SELECT
+                gene,
+                split_part(insertion_str, ':', 1)::int as position,
+                split_part(insertion_str, ':', 2) as inserted_symbols
+            FROM gene_insertions
+        )
+        SELECT
+            'ins_' || gene || ':' || position || ':' || inserted_symbols as insertion,
+            COUNT(*) as count,
+            inserted_symbols,
+            position,
+            gene as sequence_name
+        FROM parsed_insertions
+        GROUP BY gene, position, inserted_symbols
+        ORDER BY count DESC, gene ASC, position ASC
+    """
+
+    async for db in get_db():
+        result = await db.execute(text(query_str), params)
+        rows = result.fetchall()
+
+        # Format results
+        data = []
+        for row in rows:
+            data.append({
+                "insertion": row.insertion,
+                "count": row.count,
+                "insertedSymbols": row.inserted_symbols,
+                "position": row.position,
+                "sequenceName": row.sequence_name
+            })
+
+        return {
+            "data": data,
             "info": {
                 "dataVersion": "0",
                 "requestId": str(uuid.uuid4()),
-                "requestInfo": f"{organism} amino acid insertions (MOCK DATA)",
-                "queryInfo": "Insertions endpoint not yet implemented"
+                "requestInfo": f"{organism_config.schema['organismName']} on querulus",
+                "queryInfo": "Amino acid insertions query"
             }
         }
-    )
 
 
 if __name__ == "__main__":

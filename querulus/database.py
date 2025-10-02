@@ -66,6 +66,27 @@ async def health_check() -> tuple[bool, str | None]:
     Returns:
         Tuple of (is_healthy, error_message)
     """
+    # Parse database URL to show connection details (without exposing password)
+    from urllib.parse import urlparse
+
+    db_url = config.settings.database_url
+    parsed = urlparse(db_url)
+
+    # Create safe URL for logging (mask password)
+    if parsed.password:
+        safe_url = db_url.replace(parsed.password, "***")
+    else:
+        safe_url = db_url
+
+    connection_info = (
+        f"Database URL: {safe_url}\n"
+        f"  Host: {parsed.hostname}\n"
+        f"  Port: {parsed.port}\n"
+        f"  Database: {parsed.path.lstrip('/') if parsed.path else 'N/A'}\n"
+        f"  Username: {parsed.username or 'N/A'}\n"
+        f"  Driver: {parsed.scheme}"
+    )
+
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(text("SELECT 1"))
@@ -73,4 +94,8 @@ async def health_check() -> tuple[bool, str | None]:
                 return True, None
             return False, "Database query returned unexpected result"
     except Exception as e:
-        return False, f"{type(e).__name__}: {str(e)}"
+        error_msg = (
+            f"{type(e).__name__}: {str(e)}\n\n"
+            f"Connection details:\n{connection_info}"
+        )
+        return False, error_msg

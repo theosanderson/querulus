@@ -54,17 +54,16 @@ class Settings(BaseSettings):
     database_max_overflow: int = 10
     config_path: str = "config/querulus_config.json"
 
-    # Support both individual env vars (local dev) and DB_URL (k8s)
+    # Database env vars (matching backend: DB_URL, DB_USERNAME, DB_PASSWORD)
     db_url: str | None = None
     db_username: str | None = None
     db_password: str | None = None
 
-    class Config:
-        env_prefix = "QUERULUS_"
-        case_sensitive = False
+    model_config = {"case_sensitive": False, "extra": "ignore"}
 
-    def __init__(self, **data):
+    def __init__(self, **data) -> None:
         super().__init__(**data)
+
         # If DB_URL is provided (Kubernetes), convert from JDBC to asyncpg format
         if self.db_url:
             # Convert jdbc:postgresql://... to postgresql+asyncpg://...

@@ -8,12 +8,34 @@ from sqlalchemy.sql import Select
 class QueryBuilder:
     """Builds SQL queries from LAPIS-style parameters"""
 
+    # Fields that map to table columns (not JSONB metadata)
+    TABLE_COLUMN_FIELDS = {
+        "is_revocation",  # boolean column
+        "accession",      # text column
+        "version",        # bigint column
+        "submitter",      # text column
+        "group_id",       # integer column
+        "submission_id",  # text column
+        "version_comment",# text column
+    }
+
     def __init__(self, organism: str, organism_config: Any = None):
         self.organism = organism
         self.organism_config = organism_config
         self.filters: dict[str, Any] = {}
         self.group_by_fields: list[str] = []
         self.order_by_fields: list[str] = []
+
+    def _get_filter_clause(self, field: str, param_name: str) -> str:
+        """
+        Get SQL filter clause for a field.
+
+        Returns appropriate SQL based on whether field is a table column or JSONB field.
+        """
+        if field in self.TABLE_COLUMN_FIELDS:
+            return f"{field} = :{param_name}"
+        else:
+            return f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
 
     def add_filter(self, field: str, value: Any) -> "QueryBuilder":
         """Add a metadata filter"""
@@ -295,15 +317,9 @@ class QueryBuilder:
                 if self.filters:
                     for field, value in self.filters.items():
                         if field not in computed_fields:
-                            # Special case for is_revocation - it's a table column, not JSONB
-                            if field == "is_revocation":
-                                param_name = f"filter_{field}"
-                                query += f"\n          AND is_revocation = :{param_name}"
-                                params[param_name] = value
-                            else:
-                                param_name = f"filter_{field}"
-                                query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
-                                params[param_name] = value
+                            param_name = f"filter_{field}"
+                            query += f"\n          AND {self._get_filter_clause(field, param_name)}"
+                            params[param_name] = value
 
                 query += f"""
                     )
@@ -396,11 +412,7 @@ class QueryBuilder:
                     for field, value in self.filters.items():
                         if field not in computed_fields:
                             param_name = f"filter_{field}"
-                            # Special case for is_revocation - it's a table column, not JSONB
-                            if field == "is_revocation":
-                                query += f"\n          AND is_revocation = :{param_name}"
-                            else:
-                                query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                            query += f"\n          AND {self._get_filter_clause(field, param_name)}"
                             params[param_name] = value
 
                 query += """
@@ -437,11 +449,7 @@ class QueryBuilder:
         if self.filters and not filters_already_applied:
             for field, value in self.filters.items():
                 param_name = f"filter_{field}"
-                # Special case for is_revocation - it's a table column, not JSONB
-                if field == "is_revocation":
-                    query += f"\n  AND is_revocation = :{param_name}"
-                else:
-                    query += f"\n  AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                query += f"\n  AND {self._get_filter_clause(field, param_name)}"
                 params[param_name] = value
 
         # Add GROUP BY if needed
@@ -706,11 +714,7 @@ class QueryBuilder:
                 for field, value in self.filters.items():
                     if field not in computed_fields:
                         param_name = f"filter_{field}"
-                        # Special case for is_revocation - it's a table column, not JSONB
-                        if field == "is_revocation":
-                            query += f"\n          AND is_revocation = :{param_name}"
-                        else:
-                            query += f"\n          AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                        query += f"\n          AND {self._get_filter_clause(field, param_name)}"
                         params[param_name] = value
 
             # Close the CTE and select from it
@@ -822,11 +826,7 @@ class QueryBuilder:
         if self.filters:
             for field, value in self.filters.items():
                 param_name = f"filter_{field}"
-                # Special case for is_revocation - it's a table column, not JSONB
-                if field == "is_revocation":
-                    query += f"\n  AND is_revocation = :{param_name}"
-                else:
-                    query += f"\n  AND joint_metadata -> 'metadata' ->> '{field}' = :{param_name}"
+                query += f"\n  AND {self._get_filter_clause(field, param_name)}"
                 params[param_name] = value
 
         # Add pagination

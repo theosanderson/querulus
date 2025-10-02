@@ -945,30 +945,7 @@ async def post_aligned_amino_acid_sequences(
             return Response(content=fasta_content, media_type="text/x-fasta")
 
 
-# ===== MUTATION ENDPOINTS (MOCK DATA) =====
-# TODO: These endpoints return empty mock data because mutation calling requires
-# alignment analysis that is not implemented yet. They return the correct format
-# to prevent client errors.
-
-
-@app.post("/{organism}/sample/aminoAcidMutations")
-async def post_amino_acid_mutations(organism: str):
-    """
-    Get amino acid mutations (MOCK - returns empty data).
-
-    TODO: Implement actual mutation calling by comparing translated sequences to reference.
-    """
-    return JSONResponse(
-        content={
-            "data": [],
-            "info": {
-                "dataVersion": "0",
-                "requestId": str(uuid.uuid4()),
-                "requestInfo": f"{organism} amino acid mutations (MOCK DATA)",
-                "queryInfo": "Mutations endpoint not yet implemented"
-            }
-        }
-    )
+# ===== MUTATION ENDPOINTS =====
 
 
 @app.post("/{organism}/sample/nucleotideInsertions")

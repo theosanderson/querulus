@@ -286,6 +286,159 @@ async def get_aligned_nucleotide_sequences(
         return Response(content=fasta_content, media_type="text/x-fasta")
 
 
+@app.get("/{organism}/sample/unalignedNucleotideSequences")
+async def get_unaligned_nucleotide_sequences(
+    organism: str,
+    request: Request,
+    limit: int | None = Query(None, description="Maximum number of sequences"),
+    offset: int = Query(0, description="Number of sequences to skip"),
+):
+    """
+    Get unaligned nucleotide sequences in FASTA format.
+
+    Examples:
+    - GET /west-nile/sample/unalignedNucleotideSequences?limit=10
+    - GET /west-nile/sample/unalignedNucleotideSequences?geoLocCountry=USA&limit=5
+    """
+    # Validate organism
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+    # Build query using QueryBuilder
+    builder = QueryBuilder(organism, organism_config)
+    query_params = dict(request.query_params)
+    builder.add_filters_from_params(query_params)
+
+    # Build sequences query - unaligned sequences are in unalignedNucleotideSequences
+    query_str, params = builder.build_unaligned_sequences_query("main", limit, offset)
+
+    # Execute query
+    async for db in get_db():
+        result = await db.execute(text(query_str), params)
+        rows = result.fetchall()
+
+        # Decompress sequences and format as FASTA
+        fasta_lines = []
+        compression = request.app.state.compression
+
+        for row in rows:
+            accession_version = f"{row.accession}.{row.version}"
+            compressed_seq = row.compressed_seq
+
+            if not compressed_seq:
+                continue
+
+            try:
+                # Decompress sequence
+                sequence = compression.decompress_nucleotide_sequence(
+                    compressed_seq, organism, "main"
+                )
+                # Add FASTA header and sequence
+                fasta_lines.append(f">{accession_version}")
+                fasta_lines.append(sequence)
+            except Exception as e:
+                print(f"Error decompressing {accession_version}: {e}")
+                continue
+
+        # Return FASTA format
+        fasta_content = "\n".join(fasta_lines)
+        return Response(content=fasta_content, media_type="text/x-fasta")
+
+
+@app.get("/{organism}/sample/alignedAminoAcidSequences/{gene}")
+async def get_aligned_amino_acid_sequences(
+    organism: str,
+    gene: str,
+    request: Request,
+    limit: int | None = Query(None, description="Maximum number of sequences"),
+    offset: int = Query(0, description="Number of sequences to skip"),
+):
+    """
+    Get aligned amino acid sequences in FASTA format.
+
+    Examples:
+    - GET /west-nile/sample/alignedAminoAcidSequences/2K?limit=10
+    - GET /west-nile/sample/alignedAminoAcidSequences/2K?geoLocCountry=USA&limit=5
+    """
+    # Validate organism
+    try:
+        organism_config = config.get_organism_config(organism)
+    except ValueError as e:
+        return JSONResponse(status_code=404, content={"error": str(e)})
+
+    # Build query using QueryBuilder - amino acid sequences are in alignedAminoAcidSequences
+    builder = QueryBuilder(organism, organism_config)
+    query_params = dict(request.query_params)
+    builder.add_filters_from_params(query_params)
+
+    # Build sequences query for amino acid
+    params = {"organism": organism}
+    # Build WHERE clause for filters
+    where_clauses = []
+    for field, value in builder.filters.items():
+        param_name = f"filter_{field}"
+        where_clauses.append(f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}")
+        params[param_name] = value
+
+    where_clause = ""
+    if where_clauses:
+        where_clause = " AND " + " AND ".join(where_clauses)
+
+    # Query for amino acid sequences
+    query_str = f"""
+        SELECT
+            accession,
+            version,
+            joint_metadata -> 'alignedAminoAcidSequences' -> :gene ->> 'compressedSequence' as compressed_seq
+        FROM sequence_entries_view
+        WHERE organism = :organism
+          AND released_at IS NOT NULL
+          {where_clause}
+        ORDER BY accession, version
+    """
+
+    if limit is not None:
+        query_str += f" LIMIT {limit}"
+    if offset > 0:
+        query_str += f" OFFSET {offset}"
+
+    params["gene"] = gene
+
+    # Execute query
+    async for db in get_db():
+        result = await db.execute(text(query_str), params)
+        rows = result.fetchall()
+
+        # Decompress sequences and format as FASTA
+        fasta_lines = []
+        compression = request.app.state.compression
+
+        for row in rows:
+            accession_version = f"{row.accession}.{row.version}"
+            compressed_seq = row.compressed_seq
+
+            if not compressed_seq:
+                continue
+
+            try:
+                # Decompress amino acid sequence
+                sequence = compression.decompress_amino_acid_sequence(
+                    compressed_seq, organism, gene
+                )
+                # Add FASTA header and sequence
+                fasta_lines.append(f">{accession_version}")
+                fasta_lines.append(sequence)
+            except Exception as e:
+                print(f"Error decompressing {accession_version}: {e}")
+                continue
+
+        # Return FASTA format
+        fasta_content = "\n".join(fasta_lines)
+        return Response(content=fasta_content, media_type="text/x-fasta")
+
+
 if __name__ == "__main__":
     import uvicorn
 

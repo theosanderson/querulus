@@ -434,6 +434,54 @@ class QueryBuilder:
 
         return query, params
 
+    def build_unaligned_sequences_query(
+        self,
+        segment_name: str = "main",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[str, dict]:
+        """
+        Build query to fetch unaligned compressed sequences for decompression.
+        Args:
+            segment_name: Name of the nucleotide sequence segment (e.g., 'main')
+            limit: Maximum number of results
+            offset: Number of results to skip
+        Returns:
+            Tuple of (query_string, params_dict)
+        """
+        params = {"organism": self.organism}
+        # Build WHERE clause for filters
+        where_clauses = []
+        for field, value in self.filters.items():
+            param_name = f"filter_{field}"
+            where_clauses.append(f"joint_metadata -> 'metadata' ->> '{field}' = :{param_name}")
+            params[param_name] = value
+
+        where_clause = ""
+        if where_clauses:
+            where_clause = " AND " + " AND ".join(where_clauses)
+
+        # Build query - note: unalignedNucleotideSequences instead of alignedNucleotideSequences
+        query = f"""
+        SELECT
+            accession,
+            version,
+            joint_metadata -> 'unalignedNucleotideSequences' -> '{segment_name}' ->> 'compressedSequence' as compressed_seq
+        FROM sequence_entries_view
+        WHERE organism = :organism
+          AND released_at IS NOT NULL
+          AND joint_metadata -> 'unalignedNucleotideSequences' -> '{segment_name}' ->> 'compressedSequence' IS NOT NULL
+          {where_clause}
+        ORDER BY accession, version
+        """
+
+        if limit is not None:
+            query += f" LIMIT {limit}"
+        if offset:
+            query += f" OFFSET {offset}"
+
+        return query, params
+
     def build_details_query(
         self, selected_fields: list[str] | None = None, limit: int | None = None, offset: int = 0
     ) -> tuple[str, dict[str, Any]]:

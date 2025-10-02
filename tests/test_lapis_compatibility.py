@@ -375,6 +375,63 @@ class TestDetailsEndpoint:
         assert len(set(accessions1) & set(accessions2)) == 0, "Pagination returned overlapping results"
 
 
+class TestSequenceEndpoints:
+    """Tests for sequence endpoints"""
+
+    def test_nucleotide_sequences_basic(self, config: TestConfig):
+        """Test basic nucleotide sequences query"""
+        params = {"limit": "2"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/alignedNucleotideSequences"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/alignedNucleotideSequences"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_fasta = lapis_resp.text
+        querulus_fasta = querulus_resp.text
+
+        # Extract headers for comparison
+        lapis_headers = [line for line in lapis_fasta.split('\n') if line.startswith('>')]
+        querulus_headers = [line for line in querulus_fasta.split('\n') if line.startswith('>')]
+
+        assert len(lapis_headers) == len(querulus_headers), "Different number of sequences"
+        assert lapis_headers == querulus_headers, "Different sequence headers"
+
+        # Extract sequences for comparison
+        lapis_seqs = []
+        querulus_seqs = []
+
+        for fasta_text, seq_list in [(lapis_fasta, lapis_seqs), (querulus_fasta, querulus_seqs)]:
+            current_seq = []
+            for line in fasta_text.split('\n'):
+                if line.startswith('>'):
+                    if current_seq:
+                        seq_list.append(''.join(current_seq))
+                        current_seq = []
+                elif line.strip():
+                    current_seq.append(line.strip())
+            if current_seq:
+                seq_list.append(''.join(current_seq))
+
+        assert lapis_seqs == querulus_seqs, "Sequences don't match"
+
+    def test_nucleotide_sequences_with_filter(self, config: TestConfig):
+        """Test nucleotide sequences with country filter"""
+        params = {"geoLocCountry": "USA", "limit": "3"}
+
+        lapis_resp = requests.get(config.lapis_endpoint("sample/alignedNucleotideSequences"), params=params)
+        querulus_resp = requests.get(config.querulus_endpoint("sample/alignedNucleotideSequences"), params=params)
+
+        assert lapis_resp.status_code == 200
+        assert querulus_resp.status_code == 200
+
+        lapis_headers = [line for line in lapis_resp.text.split('\n') if line.startswith('>')]
+        querulus_headers = [line for line in querulus_resp.text.split('\n') if line.startswith('>')]
+
+        assert lapis_headers == querulus_headers, "Filtered sequences don't match"
+
+
 if __name__ == "__main__":
     # Run tests with pytest
     import sys

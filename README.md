@@ -1,4 +1,4 @@
-# Querulus
+# Querulus - VERY WIP
 
 **Direct PostgreSQL-backed LAPIS API replacement**
 
